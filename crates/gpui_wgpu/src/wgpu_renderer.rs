@@ -5,13 +5,14 @@ use gpui::{
     PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, SubpixelSprite,
     Underline, get_gamma_correction_ratios,
 };
+use image::RgbaImage;
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::cell::RefCell;
 use std::num::NonZeroU64;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -317,7 +318,7 @@ impl WgpuRenderer {
         }
 
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format: surface_format,
             width: clamped_width.max(1),
             height: clamped_height.max(1),
@@ -1037,6 +1038,129 @@ impl WgpuRenderer {
     }
 
     pub fn draw(&mut self, scene: &Scene) {
+        self.prepare_frame();
+        self.atlas.before_frame();
+
+        let frame = match self.resources().surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                drop(frame);
+                self.reconfigure_surface();
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                self.reconfigure_surface();
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                *self.last_error.lock().unwrap() =
+                    Some("Surface texture validation error".to_string());
+                return;
+            }
+        };
+
+        self.ensure_intermediate_textures();
+        self.write_globals();
+
+        let frame_view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let Ok(encoder) = self.encode_scene_to_view(scene, &frame_view) else {
+            log::error!(
+                "instance buffer size grew too large: {}",
+                self.instance_buffer_capacity
+            );
+            frame.present();
+            return;
+        };
+
+        self.resources()
+            .queue
+            .submit(std::iter::once(encoder.finish()));
+        frame.present();
+    }
+
+    pub fn render_to_image(&mut self, scene: &Scene) -> anyhow::Result<RgbaImage> {
+        self.prepare_frame();
+        self.atlas.before_frame();
+
+        let frame = match self.resources().surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                drop(frame);
+                self.reconfigure_surface();
+                anyhow::bail!("Surface texture became suboptimal during capture")
+            }
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                self.reconfigure_surface();
+                anyhow::bail!("Surface texture was lost during capture")
+            }
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                anyhow::bail!("Timed out acquiring a surface texture for capture")
+            }
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                anyhow::bail!("Surface capture is unavailable while the window is occluded")
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                anyhow::bail!("Surface texture validation error during capture")
+            }
+        };
+
+        self.ensure_intermediate_textures();
+        self.write_globals();
+
+        let frame_view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self.encode_scene_to_view(scene, &frame_view)?;
+
+        let width = self.surface_config.width;
+        let height = self.surface_config.height;
+        let padded_bytes_per_row =
+            (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let readback_size = padded_bytes_per_row as u64 * height as u64;
+        let readback = self.resources().device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("capture_readback"),
+            size: readback_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &frame.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        self.resources()
+            .queue
+            .submit(std::iter::once(encoder.finish()));
+        drop(frame);
+
+        self.read_buffer_to_image(readback, width, height, padded_bytes_per_row)
+    }
+
+    fn prepare_frame(&mut self) {
         let last_error = self.last_error.lock().unwrap().take();
         if let Some(error) = last_error {
             self.failed_frame_count += 1;
@@ -1050,46 +1174,17 @@ impl WgpuRenderer {
         } else {
             self.failed_frame_count = 0;
         }
+    }
 
-        self.atlas.before_frame();
+    fn reconfigure_surface(&mut self) {
+        let surface_config = self.surface_config.clone();
+        let resources = self.resources_mut();
+        resources
+            .surface
+            .configure(&resources.device, &surface_config);
+    }
 
-        let frame = match self.resources().surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                // Textures must be destroyed before the surface can be reconfigured.
-                drop(frame);
-                let surface_config = self.surface_config.clone();
-                let resources = self.resources_mut();
-                resources
-                    .surface
-                    .configure(&resources.device, &surface_config);
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                let surface_config = self.surface_config.clone();
-                let resources = self.resources_mut();
-                resources
-                    .surface
-                    .configure(&resources.device, &surface_config);
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                *self.last_error.lock().unwrap() =
-                    Some("Surface texture validation error".to_string());
-                return;
-            }
-        };
-
-        // Now that we know the surface is healthy, ensure intermediate textures exist
-        self.ensure_intermediate_textures();
-
-        let frame_view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
+    fn write_globals(&self) {
         let gamma_params = GammaParams {
             gamma_ratios: self.rendering_params.gamma_ratios,
             grayscale_enhanced_contrast: self.rendering_params.grayscale_enhanced_contrast,
@@ -1117,25 +1212,29 @@ impl WgpuRenderer {
             ..globals
         };
 
-        {
-            let resources = self.resources();
-            resources.queue.write_buffer(
-                &resources.globals_buffer,
-                0,
-                bytemuck::bytes_of(&globals),
-            );
-            resources.queue.write_buffer(
-                &resources.globals_buffer,
-                self.path_globals_offset,
-                bytemuck::bytes_of(&path_globals),
-            );
-            resources.queue.write_buffer(
-                &resources.globals_buffer,
-                self.gamma_offset,
-                bytemuck::bytes_of(&gamma_params),
-            );
-        }
+        let resources = self.resources();
+        resources.queue.write_buffer(
+            &resources.globals_buffer,
+            0,
+            bytemuck::bytes_of(&globals),
+        );
+        resources.queue.write_buffer(
+            &resources.globals_buffer,
+            self.path_globals_offset,
+            bytemuck::bytes_of(&path_globals),
+        );
+        resources.queue.write_buffer(
+            &resources.globals_buffer,
+            self.gamma_offset,
+            bytemuck::bytes_of(&gamma_params),
+        );
+    }
 
+    fn encode_scene_to_view(
+        &mut self,
+        scene: &Scene,
+        target_view: &wgpu::TextureView,
+    ) -> anyhow::Result<wgpu::CommandEncoder> {
         loop {
             let mut instance_offset: u64 = 0;
             let mut overflow = false;
@@ -1151,7 +1250,7 @@ impl WgpuRenderer {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("main_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &frame_view,
+                        view: target_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -1190,7 +1289,7 @@ impl WgpuRenderer {
                             pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                                 label: Some("main_pass_continued"),
                                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: &frame_view,
+                                    view: target_view,
                                     resolve_target: None,
                                     ops: wgpu::Operations {
                                         load: wgpu::LoadOp::Load,
@@ -1240,7 +1339,6 @@ impl WgpuRenderer {
                             ),
                         PrimitiveBatch::Surfaces(_surfaces) => {
                             // Surfaces are macOS-only for video playback
-                            // Not implemented for Linux/wgpu
                             true
                         }
                     };
@@ -1254,23 +1352,71 @@ impl WgpuRenderer {
             if overflow {
                 drop(encoder);
                 if self.instance_buffer_capacity >= self.max_buffer_size {
-                    log::error!(
+                    anyhow::bail!(
                         "instance buffer size grew too large: {}",
                         self.instance_buffer_capacity
                     );
-                    frame.present();
-                    return;
                 }
+
                 self.grow_instance_buffer();
                 continue;
             }
 
-            self.resources()
-                .queue
-                .submit(std::iter::once(encoder.finish()));
-            frame.present();
-            return;
+            return Ok(encoder);
         }
+    }
+
+    fn read_buffer_to_image(
+        &self,
+        readback: wgpu::Buffer,
+        width: u32,
+        height: u32,
+        padded_bytes_per_row: u32,
+    ) -> anyhow::Result<RgbaImage> {
+        let slice = readback.slice(..);
+        let (tx, rx) = mpsc::sync_channel(1);
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+
+        self.resources()
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .map_err(|error| anyhow::anyhow!("Failed to poll GPU for capture readback: {error:?}"))?;
+
+        rx.recv()
+            .map_err(|_| anyhow::anyhow!("Capture readback channel closed"))?
+            .map_err(|error| anyhow::anyhow!("Failed to map capture readback buffer: {error:?}"))?;
+
+        let bytes_per_row = width as usize * 4;
+        let padded_bytes_per_row = padded_bytes_per_row as usize;
+        let mapped = slice.get_mapped_range();
+        let mut pixels = vec![0u8; bytes_per_row * height as usize];
+
+        for y in 0..height as usize {
+            let src_offset = y * padded_bytes_per_row;
+            let dst_offset = y * bytes_per_row;
+            pixels[dst_offset..dst_offset + bytes_per_row]
+                .copy_from_slice(&mapped[src_offset..src_offset + bytes_per_row]);
+        }
+
+        drop(mapped);
+        readback.unmap();
+
+        if matches!(
+            self.surface_config.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        ) {
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+        }
+
+        RgbaImage::from_raw(width, height, pixels)
+            .ok_or_else(|| anyhow::anyhow!("Failed to build an RGBA image from capture pixels"))
     }
 
     fn draw_quads(

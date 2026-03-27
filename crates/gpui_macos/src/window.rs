@@ -1668,7 +1668,6 @@ impl PlatformWindow for MacWindow {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn render_to_image(&self, scene: &gpui::Scene) -> Result<RgbaImage> {
         let mut this = self.0.lock();
         this.renderer.render_to_image(scene)
