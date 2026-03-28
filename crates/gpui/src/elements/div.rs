@@ -2934,7 +2934,7 @@ pub struct ElementHoverState {
 }
 
 /// Shared tooltip lifecycle state used by interactive elements.
-pub enum ActiveTooltip {
+pub(crate) enum ActiveTooltip {
     /// Currently delaying before showing the tooltip.
     WaitingForShow {
         /// The delayed show task.
@@ -2958,7 +2958,7 @@ pub enum ActiveTooltip {
 }
 
 /// Clears any tooltip state for the supplied interactive element.
-pub fn clear_active_tooltip(
+pub(crate) fn clear_active_tooltip(
     active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
     window: &mut Window,
 ) {
@@ -2971,7 +2971,7 @@ pub fn clear_active_tooltip(
 }
 
 /// Clears tooltip state when the currently visible tooltip is not hoverable.
-pub fn clear_active_tooltip_if_not_hoverable(
+pub(crate) fn clear_active_tooltip_if_not_hoverable(
     active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
     window: &mut Window,
 ) {
@@ -2988,7 +2988,7 @@ pub fn clear_active_tooltip_if_not_hoverable(
 }
 
 /// Re-applies the current tooltip to the window and returns its tooltip id when visible.
-pub fn set_tooltip_on_window(
+pub(crate) fn set_tooltip_on_window(
     active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
     window: &mut Window,
 ) -> Option<TooltipId> {
@@ -3002,7 +3002,7 @@ pub fn set_tooltip_on_window(
 }
 
 /// Registers the shared tooltip mouse handlers used by GPUI interactive elements.
-pub fn register_tooltip_mouse_handlers(
+pub(crate) fn register_tooltip_mouse_handlers(
     active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
     tooltip_id: Option<TooltipId>,
     build_tooltip: Rc<dyn Fn(&mut Window, &mut App) -> Option<(AnyView, bool)>>,
