@@ -3722,6 +3722,13 @@ impl Window {
         Ok(())
     }
 
+    /// Removes a rendered SVG from the sprite atlas.
+    pub fn drop_svg(&mut self, path: SharedString, size: Size<DevicePixels>) -> Result<()> {
+        let params = RenderSvgParams { path, size };
+        self.sprite_atlas.remove(&params.into());
+        Ok(())
+    }
+
     /// Add a node to the layout tree for the current frame. Takes the `Style` of the element for which
     /// layout is being requested, along with the layout ids of any children. This method is called during
     /// calls to the [`Element::request_layout`] trait method and enables any element to participate in layout.
