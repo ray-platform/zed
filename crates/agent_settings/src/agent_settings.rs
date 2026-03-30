@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use settings::{
     DefaultAgentView, DockPosition, LanguageModelParameters, LanguageModelSelection,
     NewThreadLocation, NotifyWhenAgentWaiting, RegisterSetting, Settings, SidebarDockPosition,
-    SidebarSide, ToolPermissionMode,
+    SidebarSide, ThinkingBlockDisplay, ToolPermissionMode,
 };
 
 pub use crate::agent_profile::*;
@@ -27,6 +27,7 @@ pub struct AgentSettings {
     pub enabled: bool,
     pub button: bool,
     pub dock: DockPosition,
+    pub flexible: bool,
     pub sidebar_side: SidebarDockPosition,
     pub default_width: Pixels,
     pub default_height: Pixels,
@@ -48,6 +49,7 @@ pub struct AgentSettings {
     pub enable_feedback: bool,
     pub expand_edit_card: bool,
     pub expand_terminal_card: bool,
+    pub thinking_display: ThinkingBlockDisplay,
     pub cancel_generation_on_terminal_stop: bool,
     pub use_modifier_to_send: bool,
     pub message_editor_min_lines: usize,
@@ -423,6 +425,7 @@ impl Settings for AgentSettings {
             sidebar_side: agent.sidebar_side.unwrap(),
             default_width: px(agent.default_width.unwrap()),
             default_height: px(agent.default_height.unwrap()),
+            flexible: agent.flexible.unwrap(),
             default_model: Some(agent.default_model.unwrap()),
             inline_assistant_model: agent.inline_assistant_model,
             inline_assistant_use_streaming_tools: agent
@@ -448,6 +451,7 @@ impl Settings for AgentSettings {
             enable_feedback: agent.enable_feedback.unwrap(),
             expand_edit_card: agent.expand_edit_card.unwrap(),
             expand_terminal_card: agent.expand_terminal_card.unwrap(),
+            thinking_display: agent.thinking_display.unwrap(),
             cancel_generation_on_terminal_stop: agent.cancel_generation_on_terminal_stop.unwrap(),
             use_modifier_to_send: agent.use_modifier_to_send.unwrap(),
             message_editor_min_lines: agent.message_editor_min_lines.unwrap(),
