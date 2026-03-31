@@ -524,6 +524,7 @@ struct Quad {
     border_color: Hsla,
     corner_radii: Corners,
     border_widths: Edges,
+    transformation: TransformationMatrix,
 }
 @group(1) @binding(0) var<storage, read> b_quads: array<Quad>;
 
@@ -536,15 +537,17 @@ struct QuadVarying {
     @location(3) @interpolate(flat) background_solid: vec4<f32>,
     @location(4) @interpolate(flat) background_color0: vec4<f32>,
     @location(5) @interpolate(flat) background_color1: vec4<f32>,
+    @location(6) local_position: vec2<f32>,
 }
 
 @vertex
 fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> QuadVarying {
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     let quad = b_quads[instance_id];
+    let local_position = unit_vertex * vec2<f32>(quad.bounds.size) + quad.bounds.origin;
 
     var out = QuadVarying();
-    out.position = to_device_position(unit_vertex, quad.bounds);
+    out.position = to_device_position_transformed(unit_vertex, quad.bounds, quad.transformation);
 
     let gradient = prepare_gradient_color(
         quad.background.tag,
@@ -557,7 +560,13 @@ fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) insta
     out.background_color1 = gradient.color1;
     out.border_color = hsla_to_rgba(quad.border_color);
     out.quad_id = instance_id;
-    out.clip_distances = distance_from_clip_rect(unit_vertex, quad.bounds, quad.content_mask);
+    out.clip_distances = distance_from_clip_rect_transformed(
+        unit_vertex,
+        quad.bounds,
+        quad.content_mask,
+        quad.transformation,
+    );
+    out.local_position = local_position;
     return out;
 }
 
@@ -570,7 +579,7 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
 
     let quad = b_quads[input.quad_id];
 
-    let background_color = gradient_color(quad.background, input.position.xy, quad.bounds,
+    let background_color = gradient_color(quad.background, input.local_position, quad.bounds,
         input.background_solid, input.background_color0, input.background_color1);
 
     let unrounded = quad.corner_radii.top_left == 0.0 &&
@@ -589,7 +598,7 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
 
     let size = quad.bounds.size;
     let half_size = size / 2.0;
-    let point = input.position.xy - quad.bounds.origin;
+    let point = input.local_position - quad.bounds.origin;
     let center_to_point = point - half_size;
 
     // Signed distance field threshold for inclusion of pixels. 0.5 is the
@@ -954,6 +963,7 @@ struct Shadow {
     corner_radii: Corners,
     content_mask: Bounds,
     color: Hsla,
+    transformation: TransformationMatrix,
 }
 @group(1) @binding(0) var<storage, read> b_shadows: array<Shadow>;
 
@@ -963,6 +973,7 @@ struct ShadowVarying {
     @location(1) @interpolate(flat) shadow_id: u32,
     //TODO: use `clip_distance` once Naga supports it
     @location(3) clip_distances: vec4<f32>,
+    @location(4) local_position: vec2<f32>,
 }
 
 @vertex
@@ -975,12 +986,19 @@ fn vs_shadow(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) ins
     // spread radius to achieve the spreading effect
     shadow.bounds.origin -= vec2<f32>(margin);
     shadow.bounds.size += 2.0 * vec2<f32>(margin);
+    let local_position = unit_vertex * vec2<f32>(shadow.bounds.size) + shadow.bounds.origin;
 
     var out = ShadowVarying();
-    out.position = to_device_position(unit_vertex, shadow.bounds);
+    out.position = to_device_position_transformed(unit_vertex, shadow.bounds, shadow.transformation);
     out.color = hsla_to_rgba(shadow.color);
     out.shadow_id = instance_id;
-    out.clip_distances = distance_from_clip_rect(unit_vertex, shadow.bounds, shadow.content_mask);
+    out.clip_distances = distance_from_clip_rect_transformed(
+        unit_vertex,
+        shadow.bounds,
+        shadow.content_mask,
+        shadow.transformation,
+    );
+    out.local_position = local_position;
     return out;
 }
 
@@ -994,7 +1012,7 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
     let shadow = b_shadows[input.shadow_id];
     let half_size = shadow.bounds.size / 2.0;
     let center = shadow.bounds.origin + half_size;
-    let center_to_point = input.position.xy - center;
+    let center_to_point = input.local_position - center;
 
     let corner_radius = pick_corner_radius(center_to_point, shadow.corner_radii);
 
@@ -1127,6 +1145,7 @@ struct Underline {
     color: Hsla,
     thickness: f32,
     wavy: u32,
+    transformation: TransformationMatrix,
 }
 @group(1) @binding(0) var<storage, read> b_underlines: array<Underline>;
 
@@ -1136,18 +1155,30 @@ struct UnderlineVarying {
     @location(1) @interpolate(flat) underline_id: u32,
     //TODO: use `clip_distance` once Naga supports it
     @location(3) clip_distances: vec4<f32>,
+    @location(4) local_position: vec2<f32>,
 }
 
 @vertex
 fn vs_underline(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> UnderlineVarying {
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     let underline = b_underlines[instance_id];
+    let local_position = unit_vertex * vec2<f32>(underline.bounds.size) + underline.bounds.origin;
 
     var out = UnderlineVarying();
-    out.position = to_device_position(unit_vertex, underline.bounds);
+    out.position = to_device_position_transformed(
+        unit_vertex,
+        underline.bounds,
+        underline.transformation,
+    );
     out.color = hsla_to_rgba(underline.color);
     out.underline_id = instance_id;
-    out.clip_distances = distance_from_clip_rect(unit_vertex, underline.bounds, underline.content_mask);
+    out.clip_distances = distance_from_clip_rect_transformed(
+        unit_vertex,
+        underline.bounds,
+        underline.content_mask,
+        underline.transformation,
+    );
+    out.local_position = local_position;
     return out;
 }
 
@@ -1169,7 +1200,8 @@ fn fs_underline(input: UnderlineVarying) -> @location(0) vec4<f32> {
 
     let half_thickness = underline.thickness * 0.5;
 
-    let st = (input.position.xy - underline.bounds.origin) / underline.bounds.size.y - vec2<f32>(0.0, 0.5);
+    let st = (input.local_position - underline.bounds.origin) / underline.bounds.size.y
+        - vec2<f32>(0.0, 0.5);
     let frequency = M_PI_F * WAVE_FREQUENCY * underline.thickness / underline.bounds.size.y;
     let amplitude = (underline.thickness * WAVE_HEIGHT_RATIO) / underline.bounds.size.y;
 
@@ -1241,6 +1273,7 @@ struct PolychromeSprite {
     content_mask: Bounds,
     corner_radii: Corners,
     tile: AtlasTile,
+    transformation: TransformationMatrix,
 }
 @group(1) @binding(0) var<storage, read> b_poly_sprites: array<PolychromeSprite>;
 
@@ -1249,18 +1282,26 @@ struct PolySpriteVarying {
     @location(0) tile_position: vec2<f32>,
     @location(1) @interpolate(flat) sprite_id: u32,
     @location(3) clip_distances: vec4<f32>,
+    @location(4) local_position: vec2<f32>,
 }
 
 @vertex
 fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> PolySpriteVarying {
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     let sprite = b_poly_sprites[instance_id];
+    let local_position = unit_vertex * vec2<f32>(sprite.bounds.size) + sprite.bounds.origin;
 
     var out = PolySpriteVarying();
-    out.position = to_device_position(unit_vertex, sprite.bounds);
+    out.position = to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
     out.sprite_id = instance_id;
-    out.clip_distances = distance_from_clip_rect(unit_vertex, sprite.bounds, sprite.content_mask);
+    out.clip_distances = distance_from_clip_rect_transformed(
+        unit_vertex,
+        sprite.bounds,
+        sprite.content_mask,
+        sprite.transformation,
+    );
+    out.local_position = local_position;
     return out;
 }
 
@@ -1273,7 +1314,7 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
     }
 
     let sprite = b_poly_sprites[input.sprite_id];
-    let distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
+    let distance = quad_sdf(input.local_position, sprite.bounds, sprite.corner_radii);
 
     var color = sample;
     if ((sprite.grayscale & 0xFFu) != 0u) {

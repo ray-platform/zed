@@ -930,7 +930,9 @@ pub struct Window {
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
+    element_transform_stack: Vec<TransformationMatrix>,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
+    paint_content_mask_stack: Vec<ContentMask<ScaledPixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
@@ -1432,6 +1434,8 @@ impl Window {
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
+            element_transform_stack: Vec::new(),
+            paint_content_mask_stack: Vec::new(),
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
@@ -2772,9 +2776,21 @@ impl Window {
     ) -> R {
         self.invalidator.debug_assert_paint_or_prepaint();
         if let Some(mask) = mask {
+            let is_paint = self.is_paint_phase();
             let mask = mask.intersect(&self.content_mask());
+            let transformed_mask = is_paint.then(|| {
+                self.intersect_paint_content_mask(
+                    self.transform_content_mask(mask.scale(self.scale_factor())),
+                )
+            });
             self.content_mask_stack.push(mask);
+            if let Some(transformed_mask) = transformed_mask.clone() {
+                self.paint_content_mask_stack.push(transformed_mask);
+            }
             let result = f(self);
+            if transformed_mask.is_some() {
+                self.paint_content_mask_stack.pop();
+            }
             self.content_mask_stack.pop();
             result
         } else {
@@ -2829,6 +2845,30 @@ impl Window {
         self.element_opacity = previous_opacity * opacity;
         let result = f(self);
         self.element_opacity = previous_opacity;
+        result
+    }
+
+    /// Applies a cumulative paint-time transform to all painting performed in the given closure.
+    ///
+    /// This affects painting only and does not change layout or hit testing.
+    pub fn with_element_transform<R>(
+        &mut self,
+        transformation: Option<TransformationMatrix>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint();
+
+        let Some(transformation) =
+            transformation.filter(|transformation| *transformation != TransformationMatrix::unit())
+        else {
+            return f(self);
+        };
+
+        let current = self.current_element_transform();
+        self.element_transform_stack
+            .push(current.compose(transformation));
+        let result = f(self);
+        self.element_transform_stack.pop();
         result
     }
 
@@ -2943,6 +2983,60 @@ impl Window {
                     size: self.viewport_size,
                 },
             })
+    }
+
+    #[inline]
+    fn is_paint_phase(&self) -> bool {
+        matches!(self.invalidator.inner.borrow().draw_phase, DrawPhase::Paint)
+    }
+
+    #[inline]
+    fn current_element_transform(&self) -> TransformationMatrix {
+        self.element_transform_stack
+            .last()
+            .copied()
+            .unwrap_or_default()
+    }
+
+    #[inline]
+    fn transform_scaled_bounds(&self, bounds: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
+        self.current_element_transform()
+            .apply_to_scaled_bounds(bounds)
+    }
+
+    #[inline]
+    fn transform_content_mask(
+        &self,
+        content_mask: ContentMask<ScaledPixels>,
+    ) -> ContentMask<ScaledPixels> {
+        ContentMask {
+            bounds: self.transform_scaled_bounds(content_mask.bounds),
+        }
+    }
+
+    #[inline]
+    fn paint_content_mask(&self) -> ContentMask<ScaledPixels> {
+        self.invalidator.debug_assert_paint();
+        self.paint_content_mask_stack
+            .last()
+            .cloned()
+            .unwrap_or_else(|| ContentMask {
+                bounds: Bounds {
+                    origin: Point::default(),
+                    size: self.viewport_size.scale(self.scale_factor()),
+                },
+            })
+    }
+
+    #[inline]
+    fn intersect_paint_content_mask(
+        &self,
+        content_mask: ContentMask<ScaledPixels>,
+    ) -> ContentMask<ScaledPixels> {
+        let current = self.paint_content_mask();
+        ContentMask {
+            bounds: content_mask.bounds.intersect(&current.bounds),
+        }
     }
 
     /// Provide elements in the called function with a new namespace in which their identifiers must be unique.
@@ -3166,12 +3260,12 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
-        let content_mask = self.content_mask();
-        let clipped_bounds = bounds.intersect(&content_mask.bounds);
+        let content_mask = self.paint_content_mask();
+        let clipped_bounds = self
+            .transform_scaled_bounds(bounds.scale(scale_factor))
+            .intersect(&content_mask.bounds);
         if !clipped_bounds.is_empty() {
-            self.next_frame
-                .scene
-                .push_layer(clipped_bounds.scale(scale_factor));
+            self.next_frame.scene.push_layer(clipped_bounds);
         }
 
         let result = f(self);
@@ -3195,17 +3289,19 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
-        let content_mask = self.content_mask();
+        let content_mask = self.paint_content_mask();
         let opacity = self.element_opacity();
+        let transformation = self.current_element_transform();
         for shadow in shadows {
             let shadow_bounds = (bounds + shadow.offset).dilate(shadow.spread_radius);
             self.next_frame.scene.insert_primitive(Shadow {
                 order: 0,
                 blur_radius: shadow.blur_radius.scale(scale_factor),
                 bounds: shadow_bounds.scale(scale_factor),
-                content_mask: content_mask.scale(scale_factor),
+                content_mask: content_mask.clone(),
                 corner_radii: corner_radii.scale(scale_factor),
                 color: shadow.color.opacity(opacity),
+                transformation,
             });
         }
     }
@@ -3223,17 +3319,18 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
-        let content_mask = self.content_mask();
+        let content_mask = self.paint_content_mask();
         let opacity = self.element_opacity();
         self.next_frame.scene.insert_primitive(Quad {
             order: 0,
             bounds: quad.bounds.scale(scale_factor),
-            content_mask: content_mask.scale(scale_factor),
+            content_mask,
             background: quad.background.opacity(opacity),
             border_color: quad.border_color.opacity(opacity),
             corner_radii: quad.corner_radii.scale(scale_factor),
             border_widths: quad.border_widths.scale(scale_factor),
             border_style: quad.border_style,
+            transformation: self.current_element_transform(),
         });
     }
 
@@ -3244,14 +3341,17 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
-        let content_mask = self.content_mask();
         let opacity = self.element_opacity();
-        path.content_mask = content_mask;
+        let content_mask = self.paint_content_mask();
         let color: Background = color.into();
         path.color = color.opacity(opacity);
-        self.next_frame
-            .scene
-            .insert_primitive(path.scale(scale_factor));
+        let path = path.scale(scale_factor);
+        let path = if self.current_element_transform() == TransformationMatrix::unit() {
+            path.with_content_mask(content_mask)
+        } else {
+            path.transformed(self.current_element_transform(), content_mask)
+        };
+        self.next_frame.scene.insert_primitive(path);
     }
 
     /// Paint an underline into the scene for the next frame at the current z-index.
@@ -3275,17 +3375,18 @@ impl Window {
             origin,
             size: size(width, height),
         };
-        let content_mask = self.content_mask();
+        let content_mask = self.paint_content_mask();
         let element_opacity = self.element_opacity();
 
         self.next_frame.scene.insert_primitive(Underline {
             order: 0,
             pad: 0,
             bounds: bounds.scale(scale_factor),
-            content_mask: content_mask.scale(scale_factor),
+            content_mask,
             color: style.color.unwrap_or_default().opacity(element_opacity),
             thickness: style.thickness.scale(scale_factor),
             wavy: if style.wavy { 1 } else { 0 },
+            transformation: self.current_element_transform(),
         });
     }
 
@@ -3306,17 +3407,18 @@ impl Window {
             origin,
             size: size(width, height),
         };
-        let content_mask = self.content_mask();
+        let content_mask = self.paint_content_mask();
         let opacity = self.element_opacity();
 
         self.next_frame.scene.insert_primitive(Underline {
             order: 0,
             pad: 0,
             bounds: bounds.scale(scale_factor),
-            content_mask: content_mask.scale(scale_factor),
+            content_mask,
             thickness: style.thickness.scale(scale_factor),
             color: style.color.unwrap_or_default().opacity(opacity),
             wavy: 0,
+            transformation: self.current_element_transform(),
         });
     }
 
@@ -3340,13 +3442,15 @@ impl Window {
 
         let element_opacity = self.element_opacity();
         let scale_factor = self.scale_factor();
+        let transformation = self.current_element_transform();
         let glyph_origin = origin.scale(scale_factor);
 
         let subpixel_variant = Point {
             x: (glyph_origin.x.0.fract() * SUBPIXEL_VARIANTS_X as f32).floor() as u8,
             y: (glyph_origin.y.0.fract() * SUBPIXEL_VARIANTS_Y as f32).floor() as u8,
         };
-        let subpixel_rendering = self.should_use_subpixel_rendering(font_id, font_size);
+        let subpixel_rendering = transformation == TransformationMatrix::unit()
+            && self.should_use_subpixel_rendering(font_id, font_size);
         let params = RenderGlyphParams {
             font_id,
             glyph_id,
@@ -3370,7 +3474,7 @@ impl Window {
                 origin: glyph_origin.map(|px| px.floor()) + raster_bounds.origin.map(Into::into),
                 size: tile.bounds.size.map(Into::into),
             };
-            let content_mask = self.content_mask().scale(scale_factor);
+            let content_mask = self.paint_content_mask();
 
             if subpixel_rendering {
                 self.next_frame.scene.insert_primitive(SubpixelSprite {
@@ -3380,7 +3484,7 @@ impl Window {
                     content_mask,
                     color: color.opacity(element_opacity),
                     tile,
-                    transformation: TransformationMatrix::unit(),
+                    transformation,
                 });
             } else {
                 self.next_frame.scene.insert_primitive(MonochromeSprite {
@@ -3390,7 +3494,7 @@ impl Window {
                     content_mask,
                     color: color.opacity(element_opacity),
                     tile,
-                    transformation: TransformationMatrix::unit(),
+                    transformation,
                 });
             }
         }
@@ -3415,6 +3519,7 @@ impl Window {
 
         let element_opacity = self.element_opacity();
         let scale_factor = self.scale_factor();
+        let transformation = self.current_element_transform();
         let glyph_origin = origin.scale(scale_factor);
 
         if !raster_bounds.is_zero() {
@@ -3429,7 +3534,7 @@ impl Window {
                 origin: glyph_origin.map(|px| px.floor()) + raster_bounds.origin.map(Into::into),
                 size: tile.bounds.size.map(Into::into),
             };
-            let content_mask = self.content_mask().scale(scale_factor);
+            let content_mask = self.paint_content_mask();
             self.next_frame.scene.insert_primitive(MonochromeSprite {
                 order: 0,
                 pad: 0,
@@ -3437,7 +3542,7 @@ impl Window {
                 content_mask,
                 color: color.opacity(element_opacity),
                 tile,
-                transformation: TransformationMatrix::unit(),
+                transformation,
             });
         }
         Ok(())
@@ -3459,6 +3564,7 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
+        let transformation = self.current_element_transform();
         let glyph_origin = origin.scale(scale_factor);
 
         if !raster_bounds.is_zero() {
@@ -3474,7 +3580,7 @@ impl Window {
                 origin: glyph_origin.map(|px| px.floor()) + raster_bounds.origin.map(Into::into),
                 size: tile.bounds.size.map(Into::into),
             };
-            let content_mask = self.content_mask().scale(scale_factor);
+            let content_mask = self.paint_content_mask();
             let opacity = self.element_opacity();
 
             self.next_frame.scene.insert_primitive(PolychromeSprite {
@@ -3486,6 +3592,7 @@ impl Window {
                 content_mask,
                 tile,
                 opacity,
+                transformation,
             });
         }
         Ok(())
@@ -3528,6 +3635,7 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
+        let transformation = self.current_element_transform();
         let glyph_origin = origin.scale(scale_factor);
         let params = RenderGlyphParams {
             font_id,
@@ -3554,7 +3662,7 @@ impl Window {
                 origin: glyph_origin.map(|px| px.floor()) + raster_bounds.origin.map(Into::into),
                 size: tile.bounds.size.map(Into::into),
             };
-            let content_mask = self.content_mask().scale(scale_factor);
+            let content_mask = self.paint_content_mask();
             let opacity = self.element_opacity();
 
             self.next_frame.scene.insert_primitive(PolychromeSprite {
@@ -3566,6 +3674,7 @@ impl Window {
                 content_mask,
                 tile,
                 opacity,
+                transformation,
             });
         }
         Ok(())
@@ -3608,7 +3717,7 @@ impl Window {
         else {
             return Ok(());
         };
-        let content_mask = self.content_mask().scale(scale_factor);
+        let content_mask = self.paint_content_mask();
         let svg_bounds = Bounds {
             origin: bounds.center()
                 - Point::new(
@@ -3630,7 +3739,7 @@ impl Window {
             content_mask,
             color: color.opacity(element_opacity),
             tile,
-            transformation,
+            transformation: self.current_element_transform().compose(transformation),
         });
 
         Ok(())
@@ -3669,7 +3778,7 @@ impl Window {
                 )))
             })?
             .expect("Callback above only returns Some");
-        let content_mask = self.content_mask().scale(scale_factor);
+        let content_mask = self.paint_content_mask();
         let corner_radii = corner_radii.scale(scale_factor);
         let opacity = self.element_opacity();
 
@@ -3677,13 +3786,12 @@ impl Window {
             order: 0,
             pad: 0,
             grayscale,
-            bounds: bounds
-                .map_origin(|origin| origin.floor())
-                .map_size(|size| size.ceil()),
+            bounds,
             content_mask,
             corner_radii,
             tile,
             opacity,
+            transformation: self.current_element_transform(),
         });
         Ok(())
     }
@@ -3698,8 +3806,8 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
-        let bounds = bounds.scale(scale_factor);
-        let content_mask = self.content_mask().scale(scale_factor);
+        let bounds = self.transform_scaled_bounds(bounds.scale(scale_factor));
+        let content_mask = self.paint_content_mask();
         self.next_frame.scene.insert_primitive(PaintSurface {
             order: 0,
             bounds,

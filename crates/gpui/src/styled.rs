@@ -1,9 +1,9 @@
 use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, AlignSelf, BorderStyle, CursorStyle,
     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontFeatures, FontStyle,
-    FontWeight, GridPlacement, GridTemplate, Hsla, JustifyContent, Length, SharedString,
-    StrikethroughStyle, StyleRefinement, TemplateColumnMinSize, TextAlign, TextOverflow,
-    TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
+    FontWeight, GridPlacement, GridTemplate, Hsla, JustifyContent, Length, Pixels, Point,
+    SharedString, StrikethroughStyle, StyleRefinement, TemplateColumnMinSize, TextAlign,
+    TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, point, px, relative, rems,
 };
 pub use gpui_macros::{
     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
@@ -706,6 +706,79 @@ pub trait Styled: Sized {
     /// Sets the opacity of this element and its children.
     fn opacity(mut self, opacity: f32) -> Self {
         self.style().opacity = Some(opacity);
+        self
+    }
+
+    /// Sets the paint-time rotation of this element and its children, in radians.
+    fn rotate(mut self, radians: f32) -> Self {
+        assert!(radians.is_finite(), "rotation must be finite");
+        self.style().rotate = Some(radians);
+        self
+    }
+
+    /// Sets the paint-time scale of this element and its children.
+    fn scale(mut self, scale: f32) -> Self {
+        assert!(
+            scale.is_finite() && scale > 0.0,
+            "scale must be finite and positive"
+        );
+        self.style().scale = Some(point(scale, scale));
+        self
+    }
+
+    /// Sets the paint-time scale of this element and its children independently on both axes.
+    fn scale_xy(mut self, x: f32, y: f32) -> Self {
+        assert!(
+            x.is_finite() && x > 0.0,
+            "x scale must be finite and positive"
+        );
+        assert!(
+            y.is_finite() && y > 0.0,
+            "y scale must be finite and positive"
+        );
+        self.style().scale = Some(point(x, y));
+        self
+    }
+
+    /// Sets the paint-time translation of this element and its children.
+    fn translate(mut self, translation: Point<Pixels>) -> Self {
+        self.style().translate = Some(translation);
+        self
+    }
+
+    /// Sets the paint-time transform origin of this element and its children.
+    fn transform_origin(mut self, origin: Point<f32>) -> Self {
+        assert!(
+            origin.x.is_finite() && origin.y.is_finite(),
+            "transform origin must be finite"
+        );
+        self.style().transform_origin = Some(origin);
+        self
+    }
+
+    /// Sets the paint-time skew of this element and its children, in radians.
+    fn skew(mut self, x_radians: f32, y_radians: f32) -> Self {
+        assert!(
+            x_radians.is_finite() && y_radians.is_finite(),
+            "skew must be finite"
+        );
+        self.style().skew = Some(point(x_radians, y_radians));
+        self
+    }
+
+    /// Sets the paint-time x-axis skew of this element and its children, in radians.
+    fn skew_x(mut self, radians: f32) -> Self {
+        assert!(radians.is_finite(), "skew must be finite");
+        let skew = self.style().skew.get_or_insert_with(Default::default);
+        skew.x = radians;
+        self
+    }
+
+    /// Sets the paint-time y-axis skew of this element and its children, in radians.
+    fn skew_y(mut self, radians: f32) -> Self {
+        assert!(radians.is_finite(), "skew must be finite");
+        let skew = self.style().skew.get_or_insert_with(Default::default);
+        skew.y = radians;
         self
     }
 

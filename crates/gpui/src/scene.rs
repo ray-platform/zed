@@ -218,16 +218,26 @@ pub enum Primitive {
 
 #[expect(missing_docs)]
 impl Primitive {
-    pub fn bounds(&self) -> &Bounds<ScaledPixels> {
+    pub fn bounds(&self) -> Bounds<ScaledPixels> {
         match self {
-            Primitive::Shadow(shadow) => &shadow.bounds,
-            Primitive::Quad(quad) => &quad.bounds,
-            Primitive::Path(path) => &path.bounds,
-            Primitive::Underline(underline) => &underline.bounds,
-            Primitive::MonochromeSprite(sprite) => &sprite.bounds,
-            Primitive::SubpixelSprite(sprite) => &sprite.bounds,
-            Primitive::PolychromeSprite(sprite) => &sprite.bounds,
-            Primitive::Surface(surface) => &surface.bounds,
+            Primitive::Shadow(shadow) => {
+                shadow.transformation.apply_to_scaled_bounds(shadow.bounds)
+            }
+            Primitive::Quad(quad) => quad.transformation.apply_to_scaled_bounds(quad.bounds),
+            Primitive::Path(path) => path.bounds,
+            Primitive::Underline(underline) => underline
+                .transformation
+                .apply_to_scaled_bounds(underline.bounds),
+            Primitive::MonochromeSprite(sprite) => {
+                sprite.transformation.apply_to_scaled_bounds(sprite.bounds)
+            }
+            Primitive::SubpixelSprite(sprite) => {
+                sprite.transformation.apply_to_scaled_bounds(sprite.bounds)
+            }
+            Primitive::PolychromeSprite(sprite) => {
+                sprite.transformation.apply_to_scaled_bounds(sprite.bounds)
+            }
+            Primitive::Surface(surface) => surface.bounds,
         }
     }
 
@@ -493,6 +503,7 @@ pub struct Quad {
     pub border_color: Hsla,
     pub corner_radii: Corners<ScaledPixels>,
     pub border_widths: Edges<ScaledPixels>,
+    pub transformation: TransformationMatrix,
 }
 
 impl From<Quad> for Primitive {
@@ -512,6 +523,7 @@ pub struct Underline {
     pub color: Hsla,
     pub thickness: ScaledPixels,
     pub wavy: u32,
+    pub transformation: TransformationMatrix,
 }
 
 impl From<Underline> for Primitive {
@@ -530,6 +542,7 @@ pub struct Shadow {
     pub corner_radii: Corners<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub color: Hsla,
+    pub transformation: TransformationMatrix,
 }
 
 impl From<Shadow> for Primitive {
@@ -598,6 +611,22 @@ impl TransformationMatrix {
         })
     }
 
+    /// Skew around the x axis by the given angle in radians.
+    pub fn skew_x(self, angle: Radians) -> Self {
+        self.compose(Self {
+            rotation_scale: [[1.0, angle.0.tan()], [0.0, 1.0]],
+            translation: [0.0, 0.0],
+        })
+    }
+
+    /// Skew around the y axis by the given angle in radians.
+    pub fn skew_y(self, angle: Radians) -> Self {
+        self.compose(Self {
+            rotation_scale: [[1.0, 0.0], [angle.0.tan(), 1.0]],
+            translation: [0.0, 0.0],
+        })
+    }
+
     /// Perform matrix multiplication with another transformation
     /// to produce a new transformation that is the result of
     /// applying both transformations: first, `other`, then `self`.
@@ -643,6 +672,56 @@ impl TransformationMatrix {
             }
         }
         Point::new(output[0].into(), output[1].into())
+    }
+
+    /// Apply transformation to a point in scaled pixels.
+    pub fn apply_to_scaled_point(&self, point: Point<ScaledPixels>) -> Point<ScaledPixels> {
+        let input = [point.x.0, point.y.0];
+        let mut output = self.translation;
+        for (i, output_cell) in output.iter_mut().enumerate() {
+            for (k, input_cell) in input.iter().enumerate() {
+                *output_cell += self.rotation_scale[i][k] * *input_cell;
+            }
+        }
+        Point::new(ScaledPixels(output[0]), ScaledPixels(output[1]))
+    }
+
+    /// Apply transformation to the bounds and return the enclosing axis-aligned bounds.
+    pub fn apply_to_scaled_bounds(&self, bounds: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
+        let top_left = self.apply_to_scaled_point(bounds.origin);
+        let top_right = self.apply_to_scaled_point(bounds.top_right());
+        let bottom_left = self.apply_to_scaled_point(bounds.bottom_left());
+        let bottom_right = self.apply_to_scaled_point(bounds.bottom_right());
+
+        let min_x = top_left
+            .x
+            .0
+            .min(top_right.x.0)
+            .min(bottom_left.x.0)
+            .min(bottom_right.x.0);
+        let max_x = top_left
+            .x
+            .0
+            .max(top_right.x.0)
+            .max(bottom_left.x.0)
+            .max(bottom_right.x.0);
+        let min_y = top_left
+            .y
+            .0
+            .min(top_right.y.0)
+            .min(bottom_left.y.0)
+            .min(bottom_right.y.0);
+        let max_y = top_left
+            .y
+            .0
+            .max(top_right.y.0)
+            .max(bottom_left.y.0)
+            .max(bottom_right.y.0);
+
+        Bounds::from_corners(
+            point(ScaledPixels(min_x), ScaledPixels(min_y)),
+            point(ScaledPixels(max_x), ScaledPixels(max_y)),
+        )
     }
 }
 
@@ -702,6 +781,7 @@ pub struct PolychromeSprite {
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     pub tile: AtlasTile,
+    pub transformation: TransformationMatrix,
 }
 
 impl From<PolychromeSprite> for Primitive {
@@ -869,6 +949,50 @@ where
     }
 }
 
+impl Path<ScaledPixels> {
+    /// Replace the path content mask on the path and its vertices.
+    pub fn with_content_mask(&self, content_mask: ContentMask<ScaledPixels>) -> Self {
+        Self {
+            id: self.id,
+            order: self.order,
+            bounds: self.bounds,
+            content_mask: content_mask.clone(),
+            vertices: self
+                .vertices
+                .iter()
+                .map(|vertex| vertex.with_content_mask(content_mask.clone()))
+                .collect(),
+            color: self.color,
+            start: self.start,
+            current: self.current,
+            contour_count: self.contour_count,
+        }
+    }
+
+    /// Apply a transformation to the path and return the enclosing transformed path.
+    pub fn transformed(
+        &self,
+        transformation: TransformationMatrix,
+        content_mask: ContentMask<ScaledPixels>,
+    ) -> Self {
+        Self {
+            id: self.id,
+            order: self.order,
+            bounds: transformation.apply_to_scaled_bounds(self.bounds),
+            content_mask: content_mask.clone(),
+            vertices: self
+                .vertices
+                .iter()
+                .map(|vertex| vertex.transformed(transformation, content_mask.clone()))
+                .collect(),
+            color: self.color,
+            start: transformation.apply_to_scaled_point(self.start),
+            current: transformation.apply_to_scaled_point(self.current),
+            contour_count: self.contour_count,
+        }
+    }
+}
+
 impl From<Path<ScaledPixels>> for Primitive {
     fn from(path: Path<ScaledPixels>) -> Self {
         Primitive::Path(path)
@@ -891,6 +1015,30 @@ impl PathVertex<Pixels> {
             xy_position: self.xy_position.scale(factor),
             st_position: self.st_position,
             content_mask: self.content_mask.scale(factor),
+        }
+    }
+}
+
+impl PathVertex<ScaledPixels> {
+    /// Replace the vertex content mask.
+    pub fn with_content_mask(&self, content_mask: ContentMask<ScaledPixels>) -> Self {
+        Self {
+            xy_position: self.xy_position,
+            st_position: self.st_position,
+            content_mask,
+        }
+    }
+
+    /// Apply a transformation to the vertex while overriding its content mask.
+    pub fn transformed(
+        &self,
+        transformation: TransformationMatrix,
+        content_mask: ContentMask<ScaledPixels>,
+    ) -> PathVertex<ScaledPixels> {
+        PathVertex {
+            xy_position: transformation.apply_to_scaled_point(self.xy_position),
+            st_position: self.st_position,
+            content_mask,
         }
     }
 }

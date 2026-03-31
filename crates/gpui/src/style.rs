@@ -8,8 +8,8 @@ use crate::{
     AbsoluteLength, App, Background, BackgroundTag, BorderStyle, Bounds, ContentMask, Corners,
     CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font,
     FontFallbacks, FontFeatures, FontStyle, FontWeight, GridLocation, Hsla, Length, Pixels, Point,
-    PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun, Window, black, phi,
-    point, quad, rems, size,
+    PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun,
+    TransformationMatrix, Window, black, phi, point, quad, radians, rems, size,
 };
 use collections::HashSet;
 use refineable::Refineable;
@@ -297,6 +297,24 @@ pub struct Style {
     /// The opacity of this element
     pub opacity: Option<f32>,
 
+    /// The paint-time rotation of this element and its children, in radians.
+    pub rotate: Option<f32>,
+
+    /// The paint-time scale factor of this element and its children.
+    pub scale: Option<Point<f32>>,
+
+    /// The paint-time translation of this element and its children.
+    pub translate: Option<Point<Pixels>>,
+
+    /// The paint-time skew angles of this element and its children, in radians.
+    pub skew: Option<Point<f32>>,
+
+    /// The paint-time transform origin of this element and its children.
+    ///
+    /// Values are normalized to the element bounds, where `(0, 0)` is the top-left corner
+    /// and `(1, 1)` is the bottom-right corner.
+    pub transform_origin: Option<Point<f32>>,
+
     /// The grid columns of this element
     /// Roughly equivalent to the Tailwind `grid-cols-<number>`
     pub grid_cols: Option<GridTemplate>,
@@ -574,6 +592,48 @@ impl Hash for HighlightStyle {
 }
 
 impl Style {
+    fn transform_origin(&self, bounds: Bounds<Pixels>) -> Point<Pixels> {
+        let origin = self.transform_origin.unwrap_or(point(0.5, 0.5));
+        point(
+            bounds.origin.x + bounds.size.width * origin.x,
+            bounds.origin.y + bounds.size.height * origin.y,
+        )
+    }
+
+    fn transformation(
+        &self,
+        bounds: Bounds<Pixels>,
+        scale_factor: f32,
+    ) -> Option<TransformationMatrix> {
+        let scale = self.scale.unwrap_or(point(1.0, 1.0));
+        let skew = self.skew.unwrap_or_default();
+        let translate = self.translate.unwrap_or_default();
+        let rotate = self.rotate.unwrap_or_default();
+
+        let has_transform = rotate != 0.0
+            || scale != point(1.0, 1.0)
+            || skew != Point::default()
+            || translate != Point::default();
+        if !has_transform {
+            return None;
+        }
+
+        let origin = self.transform_origin(bounds).scale(scale_factor);
+        Some(
+            TransformationMatrix::unit()
+                .translate(origin)
+                .translate(translate.scale(scale_factor))
+                .rotate(radians(rotate))
+                .skew_x(radians(skew.x))
+                .skew_y(radians(skew.y))
+                .scale(size(scale.x, scale.y))
+                .translate(point(
+                    crate::ScaledPixels(-origin.x.0),
+                    crate::ScaledPixels(-origin.y.0),
+                )),
+        )
+    }
+
     /// Returns true if the style is visible and the background is opaque.
     pub fn has_opaque_background(&self) -> bool {
         self.background
@@ -649,127 +709,134 @@ impl Style {
         cx: &mut App,
         continuation: impl FnOnce(&mut Window, &mut App),
     ) {
-        #[cfg(debug_assertions)]
-        if self.debug_below {
-            cx.set_global(DebugBelow)
-        }
+        window.with_element_transform(
+            self.transformation(bounds, window.scale_factor()),
+            |window| {
+                #[cfg(debug_assertions)]
+                if self.debug_below {
+                    cx.set_global(DebugBelow)
+                }
 
-        #[cfg(debug_assertions)]
-        if self.debug || cx.has_global::<DebugBelow>() {
-            window.paint_quad(crate::outline(bounds, crate::red(), BorderStyle::default()));
-        }
+                #[cfg(debug_assertions)]
+                if self.debug || cx.has_global::<DebugBelow>() {
+                    window.paint_quad(crate::outline(bounds, crate::red(), BorderStyle::default()));
+                }
 
-        let rem_size = window.rem_size();
-        let corner_radii = self
-            .corner_radii
-            .to_pixels(rem_size)
-            .clamp_radii_for_quad_size(bounds.size);
+                let rem_size = window.rem_size();
+                let corner_radii = self
+                    .corner_radii
+                    .to_pixels(rem_size)
+                    .clamp_radii_for_quad_size(bounds.size);
 
-        window.paint_shadows(bounds, corner_radii, &self.box_shadow);
+                window.paint_shadows(bounds, corner_radii, &self.box_shadow);
 
-        let background_color = self.background.as_ref().and_then(Fill::color);
-        if background_color.is_some_and(|color| !color.is_transparent()) {
-            let mut border_color = match background_color {
-                Some(color) => match color.tag {
-                    BackgroundTag::Solid
-                    | BackgroundTag::PatternSlash
-                    | BackgroundTag::Checkerboard => color.solid,
+                let background_color = self.background.as_ref().and_then(Fill::color);
+                if background_color.is_some_and(|color| !color.is_transparent()) {
+                    let mut border_color = match background_color {
+                        Some(color) => match color.tag {
+                            BackgroundTag::Solid
+                            | BackgroundTag::PatternSlash
+                            | BackgroundTag::Checkerboard => color.solid,
 
-                    BackgroundTag::LinearGradient => color
-                        .colors
-                        .first()
-                        .map(|stop| stop.color)
-                        .unwrap_or_default(),
-                },
-                None => Hsla::default(),
-            };
-            border_color.a = 0.;
-            window.paint_quad(quad(
-                bounds,
-                corner_radii,
-                background_color.unwrap_or_default(),
-                Edges::default(),
-                border_color,
-                self.border_style,
-            ));
-        }
+                            BackgroundTag::LinearGradient => color
+                                .colors
+                                .first()
+                                .map(|stop| stop.color)
+                                .unwrap_or_default(),
+                        },
+                        None => Hsla::default(),
+                    };
+                    border_color.a = 0.;
+                    window.paint_quad(quad(
+                        bounds,
+                        corner_radii,
+                        background_color.unwrap_or_default(),
+                        Edges::default(),
+                        border_color,
+                        self.border_style,
+                    ));
+                }
 
-        continuation(window, cx);
+                continuation(window, cx);
 
-        if self.is_border_visible() {
-            let border_widths = self.border_widths.to_pixels(rem_size);
-            let max_border_width = border_widths.max();
-            let max_corner_radius = corner_radii.max();
-            let zero_size = Size {
-                width: Pixels::ZERO,
-                height: Pixels::ZERO,
-            };
+                if self.is_border_visible() {
+                    let border_widths = self.border_widths.to_pixels(rem_size);
+                    let max_border_width = border_widths.max();
+                    let max_corner_radius = corner_radii.max();
+                    let zero_size = Size {
+                        width: Pixels::ZERO,
+                        height: Pixels::ZERO,
+                    };
 
-            let mut top_bounds = Bounds::from_corners(
-                bounds.origin,
-                bounds.top_right() + point(Pixels::ZERO, max_border_width.max(max_corner_radius)),
-            );
-            top_bounds.size = top_bounds.size.max(&zero_size);
-            let mut bottom_bounds = Bounds::from_corners(
-                bounds.bottom_left() - point(Pixels::ZERO, max_border_width.max(max_corner_radius)),
-                bounds.bottom_right(),
-            );
-            bottom_bounds.size = bottom_bounds.size.max(&zero_size);
-            let mut left_bounds = Bounds::from_corners(
-                top_bounds.bottom_left(),
-                bottom_bounds.origin + point(max_border_width, Pixels::ZERO),
-            );
-            left_bounds.size = left_bounds.size.max(&zero_size);
-            let mut right_bounds = Bounds::from_corners(
-                top_bounds.bottom_right() - point(max_border_width, Pixels::ZERO),
-                bottom_bounds.top_right(),
-            );
-            right_bounds.size = right_bounds.size.max(&zero_size);
+                    let mut top_bounds = Bounds::from_corners(
+                        bounds.origin,
+                        bounds.top_right()
+                            + point(Pixels::ZERO, max_border_width.max(max_corner_radius)),
+                    );
+                    top_bounds.size = top_bounds.size.max(&zero_size);
+                    let mut bottom_bounds = Bounds::from_corners(
+                        bounds.bottom_left()
+                            - point(Pixels::ZERO, max_border_width.max(max_corner_radius)),
+                        bounds.bottom_right(),
+                    );
+                    bottom_bounds.size = bottom_bounds.size.max(&zero_size);
+                    let mut left_bounds = Bounds::from_corners(
+                        top_bounds.bottom_left(),
+                        bottom_bounds.origin + point(max_border_width, Pixels::ZERO),
+                    );
+                    left_bounds.size = left_bounds.size.max(&zero_size);
+                    let mut right_bounds = Bounds::from_corners(
+                        top_bounds.bottom_right() - point(max_border_width, Pixels::ZERO),
+                        bottom_bounds.top_right(),
+                    );
+                    right_bounds.size = right_bounds.size.max(&zero_size);
 
-            let mut background = self.border_color.unwrap_or_default();
-            background.a = 0.;
-            let quad = quad(
-                bounds,
-                corner_radii,
-                background,
-                border_widths,
-                self.border_color.unwrap_or_default(),
-                self.border_style,
-            );
+                    let mut background = self.border_color.unwrap_or_default();
+                    background.a = 0.;
+                    let quad = quad(
+                        bounds,
+                        corner_radii,
+                        background,
+                        border_widths,
+                        self.border_color.unwrap_or_default(),
+                        self.border_style,
+                    );
 
-            window.with_content_mask(Some(ContentMask { bounds: top_bounds }), |window| {
-                window.paint_quad(quad.clone());
-            });
-            window.with_content_mask(
-                Some(ContentMask {
-                    bounds: right_bounds,
-                }),
-                |window| {
-                    window.paint_quad(quad.clone());
-                },
-            );
-            window.with_content_mask(
-                Some(ContentMask {
-                    bounds: bottom_bounds,
-                }),
-                |window| {
-                    window.paint_quad(quad.clone());
-                },
-            );
-            window.with_content_mask(
-                Some(ContentMask {
-                    bounds: left_bounds,
-                }),
-                |window| {
-                    window.paint_quad(quad);
-                },
-            );
-        }
+                    window.with_content_mask(Some(ContentMask { bounds: top_bounds }), |window| {
+                        window.paint_quad(quad.clone());
+                    });
+                    window.with_content_mask(
+                        Some(ContentMask {
+                            bounds: right_bounds,
+                        }),
+                        |window| {
+                            window.paint_quad(quad.clone());
+                        },
+                    );
+                    window.with_content_mask(
+                        Some(ContentMask {
+                            bounds: bottom_bounds,
+                        }),
+                        |window| {
+                            window.paint_quad(quad.clone());
+                        },
+                    );
+                    window.with_content_mask(
+                        Some(ContentMask {
+                            bounds: left_bounds,
+                        }),
+                        |window| {
+                            window.paint_quad(quad);
+                        },
+                    );
+                }
 
-        #[cfg(debug_assertions)]
-        if self.debug_below {
-            cx.remove_global::<DebugBelow>();
-        }
+                #[cfg(debug_assertions)]
+                if self.debug_below {
+                    cx.remove_global::<DebugBelow>();
+                }
+            },
+        );
     }
 
     fn is_border_visible(&self) -> bool {
@@ -820,6 +887,11 @@ impl Default for Style {
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,
+            rotate: None,
+            scale: None,
+            translate: None,
+            skew: None,
+            transform_origin: None,
             grid_rows: None,
             grid_cols: None,
             grid_location: None,
