@@ -28,7 +28,6 @@ pub(crate) struct WebWindowCallbacks {
 }
 
 pub(crate) struct WebWindowMutableState {
-    pub(crate) renderer: WgpuRenderer,
     pub(crate) bounds: Bounds<Pixels>,
     pub(crate) scale_factor: f32,
     pub(crate) max_texture_dimension: u32,
@@ -48,6 +47,7 @@ pub(crate) struct WebWindowInner {
     pub(crate) input_element: web_sys::HtmlInputElement,
     pub(crate) has_device_pixel_support: bool,
     pub(crate) is_mac: bool,
+    pub(crate) renderer: RefCell<WgpuRenderer>,
     pub(crate) state: RefCell<WebWindowMutableState>,
     pub(crate) callbacks: RefCell<WebWindowCallbacks>,
     pub(crate) click_state: RefCell<ClickState>,
@@ -152,7 +152,6 @@ impl WebWindow {
         };
 
         let mutable_state = WebWindowMutableState {
-            renderer,
             bounds: initial_bounds,
             scale_factor: dpr,
             max_texture_dimension,
@@ -174,6 +173,7 @@ impl WebWindow {
             input_element,
             has_device_pixel_support,
             is_mac,
+            renderer: RefCell::new(renderer),
             state: RefCell::new(mutable_state),
             callbacks: RefCell::new(WebWindowCallbacks::default()),
             click_state: RefCell::new(ClickState::default()),
@@ -261,9 +261,16 @@ impl WebWindow {
                 s.scale_factor = dpr_f32;
                 // Still fire the callback so GPUI knows the window is gone.
                 drop(s);
-                let mut cbs = inner.callbacks.borrow_mut();
-                if let Some(ref mut callback) = cbs.resize {
+                let mut callback = {
+                    let mut callbacks = inner.callbacks.borrow_mut();
+                    callbacks.resize.take()
+                };
+                if let Some(ref mut callback) = callback {
                     callback(Size::default(), dpr_f32);
+                }
+                let mut callbacks = inner.callbacks.borrow_mut();
+                if callbacks.resize.is_none() {
+                    callbacks.resize = callback;
                 }
                 return;
             }
@@ -290,9 +297,16 @@ impl WebWindow {
                 height: px(logical_height),
             };
 
-            let mut cbs = inner.callbacks.borrow_mut();
-            if let Some(ref mut callback) = cbs.resize {
+            let mut callback = {
+                let mut callbacks = inner.callbacks.borrow_mut();
+                callbacks.resize.take()
+            };
+            if let Some(ref mut callback) = callback {
                 callback(new_size, dpr_f32);
+            }
+            let mut callbacks = inner.callbacks.borrow_mut();
+            if callbacks.resize.is_none() {
+                callbacks.resize = callback;
             }
         })
     }
@@ -305,14 +319,19 @@ impl WebWindowInner {
 
         let this = Rc::clone(self);
         let closure = Closure::new(move || {
-            {
+            let mut callback = {
                 let mut callbacks = this.callbacks.borrow_mut();
-                if let Some(ref mut callback) = callbacks.request_frame {
-                    callback(RequestFrameOptions {
-                        require_presentation: true,
-                        force_render: false,
-                    });
-                }
+                callbacks.request_frame.take()
+            };
+            if let Some(ref mut callback) = callback {
+                callback(RequestFrameOptions {
+                    require_presentation: true,
+                    force_render: false,
+                });
+            }
+            let mut callbacks = this.callbacks.borrow_mut();
+            if callbacks.request_frame.is_none() {
+                callbacks.request_frame = callback;
             }
 
             // Re-schedule for the next frame
@@ -394,9 +413,16 @@ impl WebWindowInner {
                 let mut state = this.state.borrow_mut();
                 state.is_active = is_visible;
             }
-            let mut callbacks = this.callbacks.borrow_mut();
-            if let Some(ref mut callback) = callbacks.active_status_change {
+            let mut callback = {
+                let mut callbacks = this.callbacks.borrow_mut();
+                callbacks.active_status_change.take()
+            };
+            if let Some(ref mut callback) = callback {
                 callback(is_visible);
+            }
+            let mut callbacks = this.callbacks.borrow_mut();
+            if callbacks.active_status_change.is_none() {
+                callbacks.active_status_change = callback;
             }
         });
 
@@ -427,9 +453,16 @@ impl WebWindowInner {
 
         let this = Rc::clone(self);
         let closure = Closure::<dyn FnMut(JsValue)>::new(move |_event: JsValue| {
-            let mut callbacks = this.callbacks.borrow_mut();
-            if let Some(ref mut callback) = callbacks.appearance_changed {
+            let mut callback = {
+                let mut callbacks = this.callbacks.borrow_mut();
+                callbacks.appearance_changed.take()
+            };
+            if let Some(ref mut callback) = callback {
                 callback();
+            }
+            let mut callbacks = this.callbacks.borrow_mut();
+            if callbacks.appearance_changed.is_none() {
+                callbacks.appearance_changed = callback;
             }
         });
 
@@ -670,15 +703,14 @@ impl PlatformWindow for WebWindow {
                 self.inner.canvas.set_height(height);
             }
 
-            let mut state = self.inner.state.borrow_mut();
-            state.renderer.update_drawable_size(Size {
+            let mut renderer = self.inner.renderer.borrow_mut();
+            renderer.update_drawable_size(Size {
                 width: DevicePixels(width as i32),
                 height: DevicePixels(height as i32),
             });
-            drop(state);
         }
 
-        self.inner.state.borrow_mut().renderer.draw(scene);
+        self.inner.renderer.borrow_mut().draw(scene);
     }
 
     fn completed_frame(&self) {
@@ -686,19 +718,15 @@ impl PlatformWindow for WebWindow {
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        self.inner.state.borrow().renderer.sprite_atlas().clone()
+        self.inner.renderer.borrow().sprite_atlas().clone()
     }
 
     fn is_subpixel_rendering_supported(&self) -> bool {
-        self.inner
-            .state
-            .borrow()
-            .renderer
-            .supports_dual_source_blending()
+        self.inner.renderer.borrow().supports_dual_source_blending()
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        Some(self.inner.state.borrow().renderer.gpu_specs())
+        Some(self.inner.renderer.borrow().gpu_specs())
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}

@@ -128,9 +128,11 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
   float2 point = input.local_position - float2(quad.bounds.origin.x, quad.bounds.origin.y);
   float2 center_to_point = point - half_size;
 
-  // Signed distance field threshold for inclusion of pixels. 0.5 is the
-  // minimum distance between the center of the pixel and the edge.
-  const float antialias_threshold = 0.5;
+  // Keep the feather width in screen space so rotated/scaled quads stay
+  // antialiased instead of using a fixed local-space cutoff.
+  const float antialias_threshold = 0.5 * max(
+    length(float2(dfdx(input.local_position.x), dfdy(input.local_position.x))),
+    length(float2(dfdx(input.local_position.y), dfdy(input.local_position.y))));
 
   // Radius of the nearest corner
   float corner_radius = pick_corner_radius(center_to_point, quad.corner_radii);

@@ -563,9 +563,12 @@ float4 quad_fragment(QuadFragmentInput input): SV_Target {
     float2 the_point = input.local_position - quad.bounds.origin;
     float2 center_to_point = the_point - half_size;
 
-    // Signed distance field threshold for inclusion of pixels. 0.5 is the
-    // minimum distance between the center of the pixel and the edge.
-    const float antialias_threshold = 0.5;
+    // Keep the feather width in screen space so rotated/scaled quads stay
+    // antialiased instead of using a fixed local-space cutoff.
+    const float antialias_threshold = 0.5 * max(
+        length(float2(ddx(input.local_position.x), ddy(input.local_position.x))),
+        length(float2(ddx(input.local_position.y), ddy(input.local_position.y)))
+    );
 
     // Radius of the nearest corner
     float corner_radius = pick_corner_radius(center_to_point, quad.corner_radii);

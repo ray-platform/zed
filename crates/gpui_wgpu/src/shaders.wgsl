@@ -572,6 +572,11 @@ fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) insta
 
 @fragment
 fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
+    // Derivatives must be computed in uniform control flow on WebGPU.
+    let antialias_threshold = 0.5 * max(
+        length(vec2<f32>(dpdx(input.local_position.x), dpdy(input.local_position.x))),
+        length(vec2<f32>(dpdx(input.local_position.y), dpdy(input.local_position.y))));
+
     // Alpha clip first, since we don't have `clip_distance`.
     if (any(input.clip_distances < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
@@ -600,10 +605,6 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
     let half_size = size / 2.0;
     let point = input.local_position - quad.bounds.origin;
     let center_to_point = point - half_size;
-
-    // Signed distance field threshold for inclusion of pixels. 0.5 is the
-    // minimum distance between the center of the pixel and the edge.
-    let antialias_threshold = 0.5;
 
     // Radius of the nearest corner
     let corner_radius = pick_corner_radius(center_to_point, quad.corner_radii);

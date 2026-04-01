@@ -125,8 +125,16 @@ impl WebWindowInner {
     }
 
     fn dispatch_input(&self, input: PlatformInput) -> Option<DispatchEventResult> {
-        let mut borrowed = self.callbacks.borrow_mut();
-        borrowed.input.as_mut().map(|callback| callback(input))
+        let mut callback = {
+            let mut callbacks = self.callbacks.borrow_mut();
+            callbacks.input.take()
+        };
+        let result = callback.as_mut().map(|handler| handler(input));
+        let mut callbacks = self.callbacks.borrow_mut();
+        if callbacks.input.is_none() {
+            callbacks.input = callback;
+        }
+        result
     }
 
     fn register_pointer_down(self: &Rc<Self>) -> Closure<dyn FnMut(JsValue)> {
@@ -467,9 +475,16 @@ impl WebWindowInner {
                 let mut state = this.state.borrow_mut();
                 state.is_active = true;
             }
-            let mut callbacks = this.callbacks.borrow_mut();
-            if let Some(ref mut callback) = callbacks.active_status_change {
+            let mut callback = {
+                let mut callbacks = this.callbacks.borrow_mut();
+                callbacks.active_status_change.take()
+            };
+            if let Some(ref mut callback) = callback {
                 callback(true);
+            }
+            let mut callbacks = this.callbacks.borrow_mut();
+            if callbacks.active_status_change.is_none() {
+                callbacks.active_status_change = callback;
             }
         })
     }
@@ -481,9 +496,16 @@ impl WebWindowInner {
                 let mut state = this.state.borrow_mut();
                 state.is_active = false;
             }
-            let mut callbacks = this.callbacks.borrow_mut();
-            if let Some(ref mut callback) = callbacks.active_status_change {
+            let mut callback = {
+                let mut callbacks = this.callbacks.borrow_mut();
+                callbacks.active_status_change.take()
+            };
+            if let Some(ref mut callback) = callback {
                 callback(false);
+            }
+            let mut callbacks = this.callbacks.borrow_mut();
+            if callbacks.active_status_change.is_none() {
+                callbacks.active_status_change = callback;
             }
         })
     }
@@ -495,9 +517,16 @@ impl WebWindowInner {
                 let mut state = this.state.borrow_mut();
                 state.is_hovered = true;
             }
-            let mut callbacks = this.callbacks.borrow_mut();
-            if let Some(ref mut callback) = callbacks.hover_status_change {
+            let mut callback = {
+                let mut callbacks = this.callbacks.borrow_mut();
+                callbacks.hover_status_change.take()
+            };
+            if let Some(ref mut callback) = callback {
                 callback(true);
+            }
+            let mut callbacks = this.callbacks.borrow_mut();
+            if callbacks.hover_status_change.is_none() {
+                callbacks.hover_status_change = callback;
             }
         })
     }
@@ -509,9 +538,16 @@ impl WebWindowInner {
                 let mut state = this.state.borrow_mut();
                 state.is_hovered = false;
             }
-            let mut callbacks = this.callbacks.borrow_mut();
-            if let Some(ref mut callback) = callbacks.hover_status_change {
+            let mut callback = {
+                let mut callbacks = this.callbacks.borrow_mut();
+                callbacks.hover_status_change.take()
+            };
+            if let Some(ref mut callback) = callback {
                 callback(false);
+            }
+            let mut callbacks = this.callbacks.borrow_mut();
+            if callbacks.hover_status_change.is_none() {
+                callbacks.hover_status_change = callback;
             }
         })
     }
