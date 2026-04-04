@@ -28,6 +28,10 @@ pub(crate) const WM_GPUI_FORCE_UPDATE_WINDOW: u32 = WM_USER + 5;
 pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
+// Keep drag updates off the WM_PAINT path. Fast drags can flood WM_MOUSEMOVE badly enough that
+// normal paint invalidation lags behind the cursor, which makes every GPUI drag feel choppy.
+// This message lets the Windows backend deliver the latest coalesced move and draw immediately.
+pub(crate) const WM_GPUI_DRAG_UPDATE_WINDOW: u32 = WM_USER + 9;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -110,6 +114,7 @@ impl WindowsWindowInner {
             WM_SHOWWINDOW => self.handle_window_visibility_changed(handle, wparam),
             WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(lparam),
             WM_GPUI_FORCE_UPDATE_WINDOW => self.draw_window(handle, true),
+            WM_GPUI_DRAG_UPDATE_WINDOW => self.handle_drag_update_window(handle),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
             _ => None,
@@ -297,10 +302,6 @@ impl WindowsWindowInner {
 
     fn handle_mouse_move_msg(&self, handle: HWND, lparam: LPARAM, wparam: WPARAM) -> Option<isize> {
         self.start_tracking_mouse(handle, TME_LEAVE);
-
-        let Some(mut func) = self.state.callbacks.input.take() else {
-            return Some(1);
-        };
         let scale_factor = self.state.scale_factor.get();
 
         let pressed_button = match MODIFIERKEYS_FLAGS(wparam.loword() as u32) {
@@ -322,6 +323,20 @@ impl WindowsWindowInner {
             pressed_button,
             modifiers: current_modifiers(),
         });
+
+        if pressed_button.is_some() {
+            if let PlatformInput::MouseMove(event) = input {
+                // This coalescing is intentional and should survive upstream merges. Dispatching
+                // every raw WM_MOUSEMOVE during drag can starve redraw delivery on Windows.
+                self.state.pending_drag_mouse_move.replace(Some(event));
+                self.post_drag_update_window(handle);
+                return Some(0);
+            }
+        }
+
+        let Some(mut func) = self.state.callbacks.input.take() else {
+            return Some(1);
+        };
         let handled = !func(input).propagate;
         self.state.callbacks.input.set(Some(func));
 
@@ -446,6 +461,7 @@ impl WindowsWindowInner {
         lparam: LPARAM,
     ) -> Option<isize> {
         unsafe { ReleaseCapture().log_err() };
+        self.dispatch_pending_drag_mouse_move();
 
         let Some(mut func) = self.state.callbacks.input.take() else {
             return Some(1);
@@ -1149,8 +1165,20 @@ impl WindowsWindowInner {
         None
     }
 
+    fn handle_drag_update_window(&self, handle: HWND) -> Option<isize> {
+        self.state.drag_update_posted.set(false);
+        if !self.dispatch_pending_drag_mouse_move() {
+            return Some(0);
+        }
+
+        self.draw_window(handle, false)
+    }
+
     #[inline]
     fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
+        // Flush the newest coalesced drag move just before drawing so drag visuals stay synced to
+        // the cursor without replaying every intermediate WM_MOUSEMOVE.
+        self.dispatch_pending_drag_mouse_move();
         let mut request_frame = self.state.callbacks.request_frame.take()?;
 
         self.state.direct_manipulation.update();
@@ -1180,6 +1208,38 @@ impl WindowsWindowInner {
         unsafe { ValidateRect(Some(handle), None).ok().log_err() };
 
         Some(0)
+    }
+
+    fn post_drag_update_window(&self, handle: HWND) {
+        if self.state.drag_update_posted.replace(true) {
+            return;
+        }
+
+        let post_result = unsafe {
+            PostMessageW(
+                Some(handle),
+                WM_GPUI_DRAG_UPDATE_WINDOW,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        };
+        if let Err(err) = post_result {
+            self.state.drag_update_posted.set(false);
+            log::error!("failed to post drag update window message: {err}");
+        }
+    }
+
+    fn dispatch_pending_drag_mouse_move(&self) -> bool {
+        let Some(event) = self.state.pending_drag_mouse_move.take() else {
+            return false;
+        };
+        let Some(mut func) = self.state.callbacks.input.take() else {
+            return false;
+        };
+
+        let _ = func(PlatformInput::MouseMove(event));
+        self.state.callbacks.input.set(Some(func));
+        true
     }
 
     #[inline]

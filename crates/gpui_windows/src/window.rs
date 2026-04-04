@@ -55,6 +55,11 @@ pub struct WindowsWindowState {
 
     pub callbacks: Callbacks,
     pub input_handler: Cell<Option<PlatformInputHandler>>,
+    // Windows drag smoothness depends on coalescing raw WM_MOUSEMOVE at the source and replaying
+    // only the newest move right before a high-priority drag frame. Do not remove these fields
+    // during upstream merges unless the backend gets an equivalent replacement.
+    pub pending_drag_mouse_move: RefCell<Option<MouseMoveEvent>>,
+    pub drag_update_posted: Cell<bool>,
     pub ime_enabled: Cell<bool>,
     pub pending_surrogate: Cell<Option<u16>>,
     pub last_reported_modifiers: Cell<Option<Modifiers>>,
@@ -126,6 +131,8 @@ impl WindowsWindowState {
             .context("Creating DirectX renderer")?;
         let callbacks = Callbacks::default();
         let input_handler = None;
+        let pending_drag_mouse_move = RefCell::new(None);
+        let drag_update_posted = Cell::new(false);
         let pending_surrogate = None;
         let last_reported_modifiers = None;
         let last_reported_capslock = None;
@@ -150,6 +157,8 @@ impl WindowsWindowState {
             min_size,
             callbacks,
             input_handler: Cell::new(input_handler),
+            pending_drag_mouse_move,
+            drag_update_posted,
             ime_enabled: Cell::new(true),
             pending_surrogate: Cell::new(pending_surrogate),
             last_reported_modifiers: Cell::new(last_reported_modifiers),
