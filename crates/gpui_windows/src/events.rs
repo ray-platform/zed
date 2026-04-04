@@ -28,10 +28,10 @@ pub(crate) const WM_GPUI_FORCE_UPDATE_WINDOW: u32 = WM_USER + 5;
 pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
-// Keep drag updates off the WM_PAINT path. Fast drags can flood WM_MOUSEMOVE badly enough that
-// normal paint invalidation lags behind the cursor, which makes every GPUI drag feel choppy.
-// This message lets the Windows backend deliver the latest coalesced move and draw immediately.
-pub(crate) const WM_GPUI_DRAG_UPDATE_WINDOW: u32 = WM_USER + 9;
+// Keep interactive updates off the WM_PAINT path. Fast hover, wheel, keyboard, IME, and drag
+// interaction can otherwise end up waiting behind paint invalidation and feel visibly laggy.
+// This message lets the Windows backend process the latest input state and draw immediately.
+pub(crate) const WM_GPUI_INPUT_UPDATE_WINDOW: u32 = WM_USER + 9;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -65,7 +65,7 @@ impl WindowsWindowInner {
             WM_CLOSE => self.handle_close_msg(),
             WM_DESTROY => self.handle_destroy_msg(handle),
             WM_MOUSEMOVE => self.handle_mouse_move_msg(handle, lparam, wparam),
-            WM_MOUSELEAVE | WM_NCMOUSELEAVE => self.handle_mouse_leave_msg(),
+            WM_MOUSELEAVE | WM_NCMOUSELEAVE => self.handle_mouse_leave_msg(handle),
             WM_NCMOUSEMOVE => self.handle_nc_mouse_move_msg(handle, lparam),
             // Treat double click as a second single click, since we track the double clicks ourselves.
             // If you don't interact with any elements, this will fall through to the windows default
@@ -102,10 +102,10 @@ impl WindowsWindowInner {
             }
             WM_MOUSEWHEEL => self.handle_mouse_wheel_msg(handle, wparam, lparam),
             WM_MOUSEHWHEEL => self.handle_mouse_horizontal_wheel_msg(handle, wparam, lparam),
-            WM_SYSKEYUP => self.handle_syskeyup_msg(wparam, lparam),
-            WM_KEYUP => self.handle_keyup_msg(wparam, lparam),
-            WM_GPUI_KEYDOWN => self.handle_keydown_msg(wparam, lparam),
-            WM_CHAR => self.handle_char_msg(wparam),
+            WM_SYSKEYUP => self.handle_syskeyup_msg(handle, wparam, lparam),
+            WM_KEYUP => self.handle_keyup_msg(handle, wparam, lparam),
+            WM_GPUI_KEYDOWN => self.handle_keydown_msg(handle, wparam, lparam),
+            WM_CHAR => self.handle_char_msg(handle, wparam),
             WM_IME_STARTCOMPOSITION => self.handle_ime_position(handle),
             WM_IME_COMPOSITION => self.handle_ime_composition(handle, lparam),
             WM_SETCURSOR => self.handle_set_cursor(handle, lparam),
@@ -114,7 +114,7 @@ impl WindowsWindowInner {
             WM_SHOWWINDOW => self.handle_window_visibility_changed(handle, wparam),
             WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(lparam),
             WM_GPUI_FORCE_UPDATE_WINDOW => self.draw_window(handle, true),
-            WM_GPUI_DRAG_UPDATE_WINDOW => self.handle_drag_update_window(handle),
+            WM_GPUI_INPUT_UPDATE_WINDOW => self.handle_input_update_window(handle),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
             _ => None,
@@ -318,32 +318,22 @@ impl WindowsWindowInner {
         };
         let x = lparam.signed_loword() as f32;
         let y = lparam.signed_hiword() as f32;
-        let input = PlatformInput::MouseMove(MouseMoveEvent {
+        let event = MouseMoveEvent {
             position: logical_point(x, y, scale_factor),
             pressed_button,
             modifiers: current_modifiers(),
-        });
-
-        if pressed_button.is_some() {
-            if let PlatformInput::MouseMove(event) = input {
-                // This coalescing is intentional and should survive upstream merges. Dispatching
-                // every raw WM_MOUSEMOVE during drag can starve redraw delivery on Windows.
-                self.state.pending_drag_mouse_move.replace(Some(event));
-                self.post_drag_update_window(handle);
-                return Some(0);
-            }
-        }
-
-        let Some(mut func) = self.state.callbacks.input.take() else {
-            return Some(1);
         };
-        let handled = !func(input).propagate;
-        self.state.callbacks.input.set(Some(func));
 
-        if handled { Some(0) } else { Some(1) }
+        // This coalescing is intentional and should survive upstream merges. Dispatching every
+        // raw WM_MOUSEMOVE on Windows can starve redraw delivery, which breaks hover visuals,
+        // overlay scrollbars, and drags alike.
+        self.state.pending_mouse_move.replace(Some(event));
+        self.post_input_update_window(handle);
+        Some(0)
     }
 
-    fn handle_mouse_leave_msg(&self) -> Option<isize> {
+    fn handle_mouse_leave_msg(&self, handle: HWND) -> Option<isize> {
+        self.state.pending_mouse_move.take();
         self.state.hovered.set(false);
         if let Some(mut callback) = self.state.callbacks.hovered_status_change.take() {
             callback(false);
@@ -353,10 +343,11 @@ impl WindowsWindowInner {
                 .set(Some(callback));
         }
 
+        self.post_input_update_window(handle);
         Some(0)
     }
 
-    fn handle_syskeyup_msg(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+    fn handle_syskeyup_msg(&self, handle: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         let input = handle_key_event(wparam, lparam, &self.state, |keystroke, _| {
             PlatformInput::KeyUp(KeyUpEvent { keystroke })
         })?;
@@ -364,6 +355,7 @@ impl WindowsWindowInner {
 
         func(input);
         self.state.callbacks.input.set(Some(func));
+        self.post_input_update_window(handle);
 
         // Always return 0 to indicate that the message was handled, so we could properly handle `ModifiersChanged` event.
         Some(0)
@@ -371,7 +363,7 @@ impl WindowsWindowInner {
 
     // It's a known bug that you can't trigger `ctrl-shift-0`. See:
     // https://superuser.com/questions/1455762/ctrl-shift-number-key-combination-has-stopped-working-for-a-few-numbers
-    fn handle_keydown_msg(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+    fn handle_keydown_msg(&self, handle: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         let Some(input) = handle_key_event(
             wparam,
             lparam,
@@ -394,11 +386,12 @@ impl WindowsWindowInner {
         let handled = !func(input).propagate;
 
         self.state.callbacks.input.set(Some(func));
+        self.post_input_update_window(handle);
 
         if handled { Some(0) } else { Some(1) }
     }
 
-    fn handle_keyup_msg(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+    fn handle_keyup_msg(&self, handle: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         let Some(input) = handle_key_event(wparam, lparam, &self.state, |keystroke, _| {
             PlatformInput::KeyUp(KeyUpEvent { keystroke })
         }) else {
@@ -411,15 +404,17 @@ impl WindowsWindowInner {
 
         let handled = !func(input).propagate;
         self.state.callbacks.input.set(Some(func));
+        self.post_input_update_window(handle);
 
         if handled { Some(0) } else { Some(1) }
     }
 
-    fn handle_char_msg(&self, wparam: WPARAM) -> Option<isize> {
+    fn handle_char_msg(&self, handle: HWND, wparam: WPARAM) -> Option<isize> {
         let input = self.parse_char_message(wparam)?;
         self.with_input_handler(|input_handler| {
             input_handler.replace_text_in_range(None, &input);
         });
+        self.post_input_update_window(handle);
 
         Some(0)
     }
@@ -450,18 +445,19 @@ impl WindowsWindowInner {
         });
         let handled = !func(input).propagate;
         self.state.callbacks.input.set(Some(func));
+        self.post_input_update_window(handle);
 
         if handled { Some(0) } else { Some(1) }
     }
 
     fn handle_mouse_up_msg(
         &self,
-        _handle: HWND,
+        handle: HWND,
         button: MouseButton,
         lparam: LPARAM,
     ) -> Option<isize> {
         unsafe { ReleaseCapture().log_err() };
-        self.dispatch_pending_drag_mouse_move();
+        self.dispatch_pending_mouse_move();
 
         let Some(mut func) = self.state.callbacks.input.take() else {
             return Some(1);
@@ -479,6 +475,7 @@ impl WindowsWindowInner {
         });
         let handled = !func(input).propagate;
         self.state.callbacks.input.set(Some(func));
+        self.post_input_update_window(handle);
 
         if handled { Some(0) } else { Some(1) }
     }
@@ -547,6 +544,7 @@ impl WindowsWindowInner {
         });
         let handled = !func(input).propagate;
         self.state.callbacks.input.set(Some(func));
+        self.post_input_update_window(handle);
 
         if handled { Some(0) } else { Some(1) }
     }
@@ -585,6 +583,7 @@ impl WindowsWindowInner {
         });
         let handled = !func(event).propagate;
         self.state.callbacks.input.set(Some(func));
+        self.post_input_update_window(handle);
 
         if handled { Some(0) } else { Some(1) }
     }
@@ -666,7 +665,11 @@ impl WindowsWindowInner {
 
     fn handle_ime_composition(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
         let ctx = ImeContext::get(handle)?;
-        self.handle_ime_composition_inner(*ctx, lparam)
+        let result = self.handle_ime_composition_inner(*ctx, lparam);
+        if result.is_some() {
+            self.post_input_update_window(handle);
+        }
+        result
     }
 
     fn handle_ime_composition_inner(&self, ctx: HIMC, lparam: LPARAM) -> Option<isize> {
@@ -928,6 +931,7 @@ impl WindowsWindowInner {
         });
         let handled = !func(input).propagate;
         self.state.callbacks.input.set(Some(func));
+        self.post_input_update_window(handle);
 
         if handled { Some(0) } else { None }
     }
@@ -958,6 +962,7 @@ impl WindowsWindowInner {
             });
             let handled = !func(input).propagate;
             self.state.callbacks.input.set(Some(func));
+            self.post_input_update_window(handle);
 
             if handled {
                 return Some(0);
@@ -1002,6 +1007,7 @@ impl WindowsWindowInner {
             });
             let handled = !func(input).propagate;
             self.state.callbacks.input.set(Some(func));
+            self.post_input_update_window(handle);
 
             if handled {
                 return Some(0);
@@ -1165,20 +1171,18 @@ impl WindowsWindowInner {
         None
     }
 
-    fn handle_drag_update_window(&self, handle: HWND) -> Option<isize> {
-        self.state.drag_update_posted.set(false);
-        if !self.dispatch_pending_drag_mouse_move() {
-            return Some(0);
-        }
-
+    fn handle_input_update_window(&self, handle: HWND) -> Option<isize> {
+        self.state.input_update_posted.set(false);
+        self.state.direct_manipulation.clear_input_update_posted();
+        self.dispatch_pending_mouse_move();
         self.draw_window(handle, false)
     }
 
     #[inline]
     fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
-        // Flush the newest coalesced drag move just before drawing so drag visuals stay synced to
-        // the cursor without replaying every intermediate WM_MOUSEMOVE.
-        self.dispatch_pending_drag_mouse_move();
+        // Flush the newest coalesced mouse move just before drawing so hover and drag visuals stay
+        // synced to the cursor without replaying every intermediate WM_MOUSEMOVE.
+        self.dispatch_pending_mouse_move();
         let mut request_frame = self.state.callbacks.request_frame.take()?;
 
         self.state.direct_manipulation.update();
@@ -1210,27 +1214,27 @@ impl WindowsWindowInner {
         Some(0)
     }
 
-    fn post_drag_update_window(&self, handle: HWND) {
-        if self.state.drag_update_posted.replace(true) {
+    fn post_input_update_window(&self, handle: HWND) {
+        if self.state.input_update_posted.replace(true) {
             return;
         }
 
         let post_result = unsafe {
             PostMessageW(
                 Some(handle),
-                WM_GPUI_DRAG_UPDATE_WINDOW,
+                WM_GPUI_INPUT_UPDATE_WINDOW,
                 WPARAM(0),
                 LPARAM(0),
             )
         };
         if let Err(err) = post_result {
-            self.state.drag_update_posted.set(false);
-            log::error!("failed to post drag update window message: {err}");
+            self.state.input_update_posted.set(false);
+            log::error!("failed to post input update window message: {err}");
         }
     }
 
-    fn dispatch_pending_drag_mouse_move(&self) -> bool {
-        let Some(event) = self.state.pending_drag_mouse_move.take() else {
+    fn dispatch_pending_mouse_move(&self) -> bool {
+        let Some(event) = self.state.pending_mouse_move.take() else {
             return false;
         };
         let Some(mut func) = self.state.callbacks.input.take() else {

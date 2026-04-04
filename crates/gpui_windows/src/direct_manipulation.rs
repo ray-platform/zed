@@ -25,11 +25,16 @@ pub(crate) struct DirectManipulationHandler {
     _handler_cookie: u32,
     window: HWND,
     scale_factor: Rc<Cell<f32>>,
+    input_update_posted: Rc<Cell<bool>>,
     pending_events: Rc<RefCell<Vec<PlatformInput>>>,
 }
 
 impl DirectManipulationHandler {
-    pub fn new(window: HWND, scale_factor: f32) -> Result<Self> {
+    pub fn new(
+        window: HWND,
+        scale_factor: f32,
+        input_update_posted: Rc<Cell<bool>>,
+    ) -> Result<Self> {
         unsafe {
             let manager: IDirectManipulationManager =
                 CoCreateInstance(&DirectManipulationManager, None, CLSCTX_INPROC_SERVER)?;
@@ -70,6 +75,7 @@ impl DirectManipulationHandler {
                 DirectManipulationEventHandler::new(
                     window,
                     Rc::clone(&scale_factor),
+                    Rc::clone(&input_update_posted),
                     Rc::clone(&pending_events),
                 )
                 .into();
@@ -85,6 +91,7 @@ impl DirectManipulationHandler {
                 _handler_cookie: handler_cookie,
                 window,
                 scale_factor,
+                input_update_posted,
                 pending_events,
             })
         }
@@ -114,6 +121,10 @@ impl DirectManipulationHandler {
     pub fn drain_events(&self) -> Vec<PlatformInput> {
         std::mem::take(&mut *self.pending_events.borrow_mut())
     }
+
+    pub fn clear_input_update_posted(&self) {
+        self.input_update_posted.set(false);
+    }
 }
 
 impl Drop for DirectManipulationHandler {
@@ -137,6 +148,7 @@ enum GestureKind {
 struct DirectManipulationEventHandler {
     window: HWND,
     scale_factor: Rc<Cell<f32>>,
+    input_update_posted: Rc<Cell<bool>>,
     gesture_kind: Cell<GestureKind>,
     last_scale: Cell<f32>,
     last_x_offset: Cell<f32>,
@@ -149,17 +161,37 @@ impl DirectManipulationEventHandler {
     fn new(
         window: HWND,
         scale_factor: Rc<Cell<f32>>,
+        input_update_posted: Rc<Cell<bool>>,
         pending_events: Rc<RefCell<Vec<PlatformInput>>>,
     ) -> Self {
         Self {
             window,
             scale_factor,
+            input_update_posted,
             gesture_kind: Cell::new(GestureKind::None),
             last_scale: Cell::new(1.0),
             last_x_offset: Cell::new(0.0),
             last_y_offset: Cell::new(0.0),
             scroll_phase: Cell::new(TouchPhase::Started),
             pending_events,
+        }
+    }
+
+    fn post_input_update_window(&self) {
+        if self.input_update_posted.replace(true) {
+            return;
+        }
+
+        if let Err(err) = unsafe {
+            PostMessageW(
+                Some(self.window),
+                WM_GPUI_INPUT_UPDATE_WINDOW,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        } {
+            self.input_update_posted.set(false);
+            log::error!("failed to post direct manipulation input update window message: {err}");
         }
     }
 
@@ -176,6 +208,7 @@ impl DirectManipulationEventHandler {
                         modifiers,
                         touch_phase: TouchPhase::Ended,
                     }));
+                self.post_input_update_window();
             }
             GestureKind::Pinch => {
                 self.pending_events
@@ -186,6 +219,7 @@ impl DirectManipulationEventHandler {
                         modifiers,
                         phase: TouchPhase::Ended,
                     }));
+                self.post_input_update_window();
             }
             GestureKind::None => {}
         }
@@ -310,6 +344,7 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
                         modifiers,
                         phase: TouchPhase::Started,
                     }));
+                self.post_input_update_window();
             }
         } else if self.gesture_kind.get() == GestureKind::None {
             self.gesture_kind.set(GestureKind::Scroll);
@@ -330,6 +365,7 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
                         modifiers,
                         touch_phase,
                     }));
+                self.post_input_update_window();
             }
             GestureKind::Pinch => {
                 let scale_delta = scale / last_scale;
@@ -341,6 +377,7 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
                         modifiers,
                         phase: TouchPhase::Moved,
                     }));
+                self.post_input_update_window();
             }
             GestureKind::None => {}
         }
