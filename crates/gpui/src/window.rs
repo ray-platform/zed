@@ -2351,10 +2351,11 @@ impl Window {
     }
 
     fn draw_roots(&mut self, cx: &mut App) {
-        // The Windows backend may coalesce WM_MOUSEMOVE during an active drag to avoid
-        // starving redraws. Refreshing from the live platform cursor here keeps drag visuals
-        // anchored to the latest pointer position even when intermediate move messages are dropped.
-        if cx.active_drag.is_some() || self.captured_hitbox.is_some() {
+        // The Windows backend may coalesce WM_MOUSEMOVE during hover and drag to avoid starving
+        // redraw delivery. Refreshing from the live platform cursor here keeps hover visuals,
+        // overlay scrollbars, and drag affordances anchored to the latest pointer position even
+        // when intermediate move messages are dropped.
+        if self.is_window_hovered() || cx.active_drag.is_some() || self.captured_hitbox.is_some() {
             self.mouse_position = self.platform_window.mouse_position();
             self.modifiers = self.platform_window.modifiers();
             self.capslock = self.platform_window.capslock();
