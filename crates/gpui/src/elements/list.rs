@@ -391,6 +391,14 @@ impl ListState {
         self.0.borrow().items.summary().count
     }
 
+    /// Try to read the number of items without panicking if the state is already borrowed.
+    pub fn try_item_count(&self) -> Option<usize> {
+        self.0
+            .try_borrow()
+            .ok()
+            .map(|state| state.items.summary().count)
+    }
+
     /// Inform the list state that the items in `old_range` have been replaced
     /// by `count` new items that must be recalculated.
     pub fn splice(&self, old_range: Range<usize>, count: usize) {
@@ -449,9 +457,29 @@ impl ListState {
         self.0.borrow_mut().scroll_handler = Some(Box::new(handler))
     }
 
+    /// Try to set the scroll handler without panicking if the state is already borrowed.
+    pub fn try_set_scroll_handler(
+        &self,
+        handler: impl FnMut(&ListScrollEvent, &mut Window, &mut App) + 'static,
+    ) -> bool {
+        let Ok(mut state) = self.0.try_borrow_mut() else {
+            return false;
+        };
+        state.scroll_handler = Some(Box::new(handler));
+        true
+    }
+
     /// Get the current scroll offset, in terms of the list's items.
     pub fn logical_scroll_top(&self) -> ListOffset {
         self.0.borrow().logical_scroll_top()
+    }
+
+    /// Try to get the current logical scroll offset without panicking if the state is already borrowed.
+    pub fn try_logical_scroll_top(&self) -> Option<ListOffset> {
+        self.0
+            .try_borrow()
+            .ok()
+            .map(|state| state.logical_scroll_top())
     }
 
     /// Scroll the list by the given offset
@@ -492,6 +520,19 @@ impl ListState {
             item_ix: item_count,
             offset_in_item: px(0.),
         });
+    }
+
+    /// Try to scroll the list to the end without panicking if the state is already borrowed.
+    pub fn try_scroll_to_end(&self) -> bool {
+        let Ok(mut state) = self.0.try_borrow_mut() else {
+            return false;
+        };
+        let item_count = state.items.summary().count;
+        state.logical_scroll_top = Some(ListOffset {
+            item_ix: item_count,
+            offset_in_item: px(0.),
+        });
+        true
     }
 
     /// Set the follow mode for the list. In `Tail` mode, the list
@@ -537,6 +578,21 @@ impl ListState {
         }
 
         state.logical_scroll_top = Some(scroll_top);
+    }
+
+    /// Try to scroll the list without panicking if the state is already borrowed.
+    pub fn try_scroll_to(&self, mut scroll_top: ListOffset) -> bool {
+        let Ok(mut state) = self.0.try_borrow_mut() else {
+            return false;
+        };
+        let item_count = state.items.summary().count;
+        if scroll_top.item_ix >= item_count {
+            scroll_top.item_ix = item_count;
+            scroll_top.offset_in_item = px(0.);
+        }
+
+        state.logical_scroll_top = Some(scroll_top);
+        true
     }
 
     /// Scroll the list to the given item, such that the item is fully visible.
@@ -601,6 +657,37 @@ impl ListState {
         None
     }
 
+    /// Try to get the bounds for a rendered item without panicking if the state is already borrowed.
+    pub fn try_bounds_for_item(&self, ix: usize) -> Option<Bounds<Pixels>> {
+        let Ok(state) = self.0.try_borrow() else {
+            return None;
+        };
+
+        let bounds = state.last_layout_bounds.unwrap_or_default();
+        let scroll_top = state.logical_scroll_top();
+        if ix < scroll_top.item_ix {
+            return None;
+        }
+
+        let mut cursor = state.items.cursor::<Dimensions<Count, Height>>(());
+        cursor.seek(&Count(scroll_top.item_ix), Bias::Right);
+
+        let scroll_top = cursor.start().1.0 + scroll_top.offset_in_item;
+
+        cursor.seek_forward(&Count(ix), Bias::Right);
+        if let Some(&ListItem::Measured { size, .. }) = cursor.item() {
+            let &Dimensions(Count(count), Height(top), _) = cursor.start();
+            if count == ix {
+                let top = bounds.top() + top - scroll_top;
+                return Some(Bounds::from_corners(
+                    point(bounds.left(), top),
+                    point(bounds.right(), top + size.height),
+                ));
+            }
+        }
+        None
+    }
+
     /// Call this method when the user starts dragging the scrollbar.
     ///
     /// This will prevent the height reported to the scrollbar from changing during the drag
@@ -622,11 +709,28 @@ impl ListState {
         self.0.borrow_mut().set_offset_from_scrollbar(point);
     }
 
+    /// Try to set the scrollbar-derived offset without panicking if the state is already borrowed.
+    pub fn try_set_offset_from_scrollbar(&self, point: Point<Pixels>) -> bool {
+        let Ok(mut state) = self.0.try_borrow_mut() else {
+            return false;
+        };
+        state.set_offset_from_scrollbar(point);
+        true
+    }
+
     /// Returns the maximum scroll offset according to the items we have measured.
     /// This value remains constant while dragging to prevent the scrollbar from moving away unexpectedly.
     pub fn max_offset_for_scrollbar(&self) -> Point<Pixels> {
         let state = self.0.borrow();
         point(Pixels::ZERO, state.max_scroll_offset())
+    }
+
+    /// Try to get the maximum scrollbar offset without panicking if the state is already borrowed.
+    pub fn try_max_offset_for_scrollbar(&self) -> Option<Point<Pixels>> {
+        self.0
+            .try_borrow()
+            .ok()
+            .map(|state| point(Pixels::ZERO, state.max_scroll_offset()))
     }
 
     /// Returns the current scroll offset adjusted for the scrollbar
@@ -651,9 +755,48 @@ impl ListState {
         Point::new(px(0.), -offset)
     }
 
+    /// Try to get the current scrollbar-adjusted pixel offset without panicking if the state is already borrowed.
+    pub fn try_scroll_px_offset_for_scrollbar(&self) -> Option<Point<Pixels>> {
+        let Ok(state) = self.0.try_borrow() else {
+            return None;
+        };
+
+        if state.logical_scroll_top.is_none() && state.alignment == ListAlignment::Bottom {
+            return Some(Point::new(px(0.), -state.max_scroll_offset()));
+        }
+
+        let logical_scroll_top = state.logical_scroll_top();
+
+        let mut cursor = state.items.cursor::<ListItemSummary>(());
+        let summary: ListItemSummary =
+            cursor.summary(&Count(logical_scroll_top.item_ix), Bias::Right);
+        let content_height = state.items.summary().height;
+        let drag_offset =
+            content_height - state.scrollbar_drag_start_height.unwrap_or(content_height);
+        let offset = summary.height + logical_scroll_top.offset_in_item - drag_offset;
+
+        Some(Point::new(px(0.), -offset))
+    }
+
     /// Return the bounds of the viewport in pixels.
     pub fn viewport_bounds(&self) -> Bounds<Pixels> {
         self.0.borrow().last_layout_bounds.unwrap_or_default()
+    }
+
+    /// Try to get the viewport bounds without panicking if the state is already borrowed.
+    pub fn try_viewport_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.0
+            .try_borrow()
+            .ok()
+            .map(|state| state.last_layout_bounds.unwrap_or_default())
+    }
+
+    /// Try to read follow-tail state without panicking if the state is already borrowed.
+    pub fn try_is_following_tail(&self) -> Option<bool> {
+        self.0
+            .try_borrow()
+            .ok()
+            .map(|state| matches!(state.follow_state, FollowState::Tail { is_following: true }))
     }
 }
 
@@ -1185,32 +1328,35 @@ impl Element for List {
                 style.overflow.y = Overflow::Scroll;
                 style.refine(&self.style);
                 window.with_text_style(style.text_style().cloned(), |window| {
-                    let state = &mut *self.state.0.borrow_mut();
+                    let Some((max_element_width, total_height)) =
+                        self.state.0.try_borrow_mut().ok().map(|mut state| {
+                            let available_height =
+                                if let Some(last_bounds) = state.last_layout_bounds {
+                                    last_bounds.size.height
+                                } else {
+                                    // If we don't have the last layout bounds (first render),
+                                    // we might just use the overdraw value as the available height to layout enough items.
+                                    state.overdraw
+                                };
+                            let padding = style.padding.to_pixels(
+                                state.last_layout_bounds.unwrap_or_default().size.into(),
+                                window.rem_size(),
+                            );
 
-                    let available_height = if let Some(last_bounds) = state.last_layout_bounds {
-                        last_bounds.size.height
-                    } else {
-                        // If we don't have the last layout bounds (first render),
-                        // we might just use the overdraw value as the available height to layout enough items.
-                        state.overdraw
+                            let layout_response = state.layout_items(
+                                None,
+                                available_height,
+                                &padding,
+                                &mut self.render_item,
+                                window,
+                                cx,
+                            );
+                            let summary = state.items.summary();
+                            (layout_response.max_item_width, summary.height)
+                        })
+                    else {
+                        return window.request_layout(style, None, cx);
                     };
-                    let padding = style.padding.to_pixels(
-                        state.last_layout_bounds.unwrap_or_default().size.into(),
-                        window.rem_size(),
-                    );
-
-                    let layout_response = state.layout_items(
-                        None,
-                        available_height,
-                        &padding,
-                        &mut self.render_item,
-                        window,
-                        cx,
-                    );
-                    let max_element_width = layout_response.max_item_width;
-
-                    let summary = state.items.summary();
-                    let total_height = summary.height;
 
                     window.request_measured_layout(
                         style,
@@ -1255,13 +1401,22 @@ impl Element for List {
         window: &mut Window,
         cx: &mut App,
     ) -> ListPrepaintState {
-        let state = &mut *self.state.0.borrow_mut();
-        state.reset = false;
-
         let mut style = Style::default();
         style.refine(&self.style);
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+
+        let Ok(mut state) = self.state.0.try_borrow_mut() else {
+            return ListPrepaintState {
+                hitbox,
+                layout: LayoutItemsResponse {
+                    max_item_width: Pixels::ZERO,
+                    scroll_top: ListOffset::default(),
+                    item_layouts: VecDeque::new(),
+                },
+            };
+        };
+        state.reset = false;
 
         // If the width of the list has changed, invalidate all cached item heights
         if state
@@ -1325,14 +1480,9 @@ impl Element for List {
             if phase == DispatchPhase::Bubble && hitbox_id.should_handle_scroll(window) {
                 accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
                 let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
-                list_state.0.borrow_mut().scroll(
-                    &scroll_top,
-                    height,
-                    pixel_delta,
-                    current_view,
-                    window,
-                    cx,
-                )
+                if let Ok(mut state) = list_state.0.try_borrow_mut() {
+                    state.scroll(&scroll_top, height, pixel_delta, current_view, window, cx)
+                }
             }
         });
     }
