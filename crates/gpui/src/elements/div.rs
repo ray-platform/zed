@@ -1549,15 +1549,23 @@ impl Element for Div {
         let content_size = if request_layout.child_layout_ids.is_empty() {
             bounds.size
         } else if let Some(scroll_handle) = self.interactivity.tracked_scroll_handle.as_ref() {
-            let mut state = scroll_handle.0.borrow_mut();
-            state.child_bounds = Vec::with_capacity(request_layout.child_layout_ids.len());
-            for child_layout_id in &request_layout.child_layout_ids {
-                let child_bounds = window.layout_bounds(*child_layout_id);
-                child_min = child_min.min(&child_bounds.origin);
-                child_max = child_max.max(&child_bounds.bottom_right());
-                state.child_bounds.push(child_bounds);
+            if let Ok(mut state) = scroll_handle.0.try_borrow_mut() {
+                state.child_bounds = Vec::with_capacity(request_layout.child_layout_ids.len());
+                for child_layout_id in &request_layout.child_layout_ids {
+                    let child_bounds = window.layout_bounds(*child_layout_id);
+                    child_min = child_min.min(&child_bounds.origin);
+                    child_max = child_max.max(&child_bounds.bottom_right());
+                    state.child_bounds.push(child_bounds);
+                }
+                (child_max - child_min).into()
+            } else {
+                for child_layout_id in &request_layout.child_layout_ids {
+                    let child_bounds = window.layout_bounds(*child_layout_id);
+                    child_min = child_min.min(&child_bounds.origin);
+                    child_max = child_max.max(&child_bounds.bottom_right());
+                }
+                (child_max - child_min).into()
             }
-            (child_max - child_min).into()
         } else {
             for child_layout_id in &request_layout.child_layout_ids {
                 let child_bounds = window.layout_bounds(*child_layout_id);
@@ -1572,7 +1580,7 @@ impl Element for Div {
         };
 
         if let Some(scroll_handle) = self.interactivity.tracked_scroll_handle.as_ref() {
-            scroll_handle.scroll_to_active_item();
+            let _ = scroll_handle.try_scroll_to_active_item();
         }
 
         self.interactivity.prepaint(
@@ -1792,7 +1800,11 @@ impl Interactivity {
                 }
 
                 if let Some(scroll_handle) = self.tracked_scroll_handle.as_ref() {
-                    self.scroll_offset = Some(scroll_handle.0.borrow().offset.clone());
+                    if let Ok(state) = scroll_handle.0.try_borrow() {
+                        self.scroll_offset = Some(state.offset.clone());
+                    } else {
+                        self.scroll_offset.get_or_insert_with(Rc::default);
+                    }
                 } else if (self.base_style.overflow.x == Some(Overflow::Scroll)
                     || self.base_style.overflow.y == Some(Overflow::Scroll))
                     && let Some(element_state) = element_state.as_mut()
@@ -1929,7 +1941,7 @@ impl Interactivity {
             let mut tracked_scroll_handle = self
                 .tracked_scroll_handle
                 .as_ref()
-                .map(|handle| handle.0.borrow_mut());
+                .and_then(|handle| handle.0.try_borrow_mut().ok());
             if let Some(mut scroll_handle_state) = tracked_scroll_handle.as_deref_mut() {
                 scroll_handle_state.overflow = style.overflow;
                 scroll_to_bottom = mem::take(&mut scroll_handle_state.scroll_to_bottom);
@@ -3372,7 +3384,9 @@ impl ScrollAnchor {
         window.on_next_frame(move |_, _| {
             let viewport_bounds = this.handle.bounds();
             let self_bounds = *this.last_origin.borrow();
-            this.handle.set_offset(viewport_bounds.origin - self_bounds);
+            let _ = this
+                .handle
+                .try_set_offset(viewport_bounds.origin - self_bounds);
         });
     }
 }
@@ -3424,9 +3438,19 @@ impl ScrollHandle {
         *self.0.borrow().offset.borrow()
     }
 
+    /// Try to get the current scroll offset without panicking if the handle is already borrowed.
+    pub fn try_offset(&self) -> Option<Point<Pixels>> {
+        self.0.try_borrow().ok().map(|state| *state.offset.borrow())
+    }
+
     /// Get the maximum scroll offset.
     pub fn max_offset(&self) -> Point<Pixels> {
         self.0.borrow().max_offset
+    }
+
+    /// Try to get the maximum scroll offset without panicking if the handle is already borrowed.
+    pub fn try_max_offset(&self) -> Option<Point<Pixels>> {
+        self.0.try_borrow().ok().map(|state| state.max_offset)
     }
 
     /// Get the top child that's scrolled into view.
@@ -3472,6 +3496,11 @@ impl ScrollHandle {
         self.0.borrow().bounds
     }
 
+    /// Try to get the viewport bounds without panicking if the handle is already borrowed.
+    pub fn try_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.0.try_borrow().ok().map(|state| state.bounds)
+    }
+
     /// Get the bounds for a specific child.
     pub fn bounds_for_item(&self, ix: usize) -> Option<Bounds<Pixels>> {
         self.0.borrow().child_bounds.get(ix).cloned()
@@ -3496,19 +3525,21 @@ impl ScrollHandle {
         });
     }
 
-    /// Scrolls the minimal amount to either ensure that the child is
-    /// fully visible or the top element of the view depends on the
-    /// scroll strategy
-    fn scroll_to_active_item(&self) {
-        let mut state = self.0.borrow_mut();
+    /// Try to scroll to the active item without panicking if the handle is already borrowed.
+    pub fn try_scroll_to_active_item(&self) -> bool {
+        let Ok(mut state) = self.0.try_borrow_mut() else {
+            return false;
+        };
 
         let Some(active_item) = state.active_item else {
-            return;
+            return true;
         };
 
         let active_item = match state.child_bounds.get(active_item.index) {
             Some(bounds) => {
-                let mut scroll_offset = state.offset.borrow_mut();
+                let Ok(mut scroll_offset) = state.offset.try_borrow_mut() else {
+                    return false;
+                };
 
                 match active_item.strategy {
                     ScrollStrategy::FirstVisible => {
@@ -3544,7 +3575,9 @@ impl ScrollHandle {
             }
             None => Some(active_item),
         };
+
         state.active_item = active_item;
+        true
     }
 
     /// Scrolls to the bottom.
@@ -3559,6 +3592,18 @@ impl ScrollHandle {
     pub fn set_offset(&self, mut position: Point<Pixels>) {
         let state = self.0.borrow();
         *state.offset.borrow_mut() = position;
+    }
+
+    /// Try to set the offset without panicking if the handle is already borrowed.
+    pub fn try_set_offset(&self, position: Point<Pixels>) -> bool {
+        let Ok(state) = self.0.try_borrow() else {
+            return false;
+        };
+        let Ok(mut offset) = state.offset.try_borrow_mut() else {
+            return false;
+        };
+        *offset = position;
+        true
     }
 
     /// Get the logical scroll top, based on a child index and a pixel offset.

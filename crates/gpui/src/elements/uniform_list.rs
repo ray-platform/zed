@@ -212,6 +212,29 @@ impl UniformListScrollHandle {
         });
     }
 
+    fn try_take_deferred_scroll_to_item(
+        &self,
+        item_size: ItemSize,
+    ) -> Option<Option<DeferredScrollToItem>> {
+        let Ok(mut state) = self.0.try_borrow_mut() else {
+            return None;
+        };
+        state.last_item_size = Some(item_size);
+        Some(state.deferred_scroll_to_item.take())
+    }
+
+    fn try_base_handle(&self) -> Option<ScrollHandle> {
+        self.0
+            .try_borrow()
+            .ok()
+            .map(|state| state.base_handle.clone())
+    }
+
+    /// Try to check whether the list is flipped vertically without panicking if the handle is already borrowed.
+    pub fn try_y_flipped(&self) -> Option<bool> {
+        self.0.try_borrow().ok().map(|state| state.y_flipped)
+    }
+
     /// Check if the list is flipped vertically.
     pub fn y_flipped(&self) -> bool {
         self.0.borrow().y_flipped
@@ -357,13 +380,13 @@ impl Element for UniformList {
 
         let shared_scroll_offset = self.interactivity.scroll_offset.clone().unwrap();
         let item_height = longest_item_size.height;
-        let shared_scroll_to_item = self.scroll_handle.as_mut().and_then(|handle| {
-            let mut handle = handle.0.borrow_mut();
-            handle.last_item_size = Some(ItemSize {
-                item: padded_bounds.size,
-                contents: content_size,
-            });
-            handle.deferred_scroll_to_item.take()
+        let shared_scroll_to_item = self.scroll_handle.as_ref().and_then(|handle| {
+            handle
+                .try_take_deferred_scroll_to_item(ItemSize {
+                    item: padded_bounds.size,
+                    contents: content_size,
+                })
+                .unwrap_or(None)
         });
 
         self.interactivity.prepaint(
@@ -375,8 +398,7 @@ impl Element for UniformList {
             cx,
             |_style, mut scroll_offset, hitbox, window, cx| {
                 let y_flipped = if let Some(scroll_handle) = &self.scroll_handle {
-                    let scroll_state = scroll_handle.0.borrow();
-                    scroll_state.y_flipped
+                    scroll_handle.try_y_flipped().unwrap_or(false)
                 } else {
                     false
                 };
@@ -669,7 +691,9 @@ impl UniformList {
 
     /// Track and render scroll state of this list with reference to the given scroll handle.
     pub fn track_scroll(mut self, handle: &UniformListScrollHandle) -> Self {
-        self.interactivity.tracked_scroll_handle = Some(handle.0.borrow().base_handle.clone());
+        if let Some(base_handle) = handle.try_base_handle() {
+            self.interactivity.tracked_scroll_handle = Some(base_handle);
+        }
         self.scroll_handle = Some(handle.clone());
         self
     }
@@ -677,22 +701,26 @@ impl UniformList {
     /// Sets whether the list is flipped vertically, such that item 0 appears at the bottom.
     pub fn y_flipped(mut self, y_flipped: bool) -> Self {
         if let Some(ref scroll_handle) = self.scroll_handle {
-            let mut scroll_state = scroll_handle.0.borrow_mut();
-            let mut base_handle = &scroll_state.base_handle;
-            let offset = base_handle.offset();
-            match scroll_state.last_item_size {
-                Some(last_size) if scroll_state.y_flipped != y_flipped => {
-                    let new_y_offset =
-                        -(offset.y + last_size.contents.height - last_size.item.height);
-                    base_handle.set_offset(point(offset.x, new_y_offset));
-                    scroll_state.y_flipped = y_flipped;
+            if let Ok(mut scroll_state) = scroll_handle.0.try_borrow_mut() {
+                let base_handle = scroll_state.base_handle.clone();
+                if let Some(offset) = base_handle.try_offset() {
+                    match scroll_state.last_item_size {
+                        Some(last_size) if scroll_state.y_flipped != y_flipped => {
+                            let new_y_offset =
+                                -(offset.y + last_size.contents.height - last_size.item.height);
+                            if base_handle.try_set_offset(point(offset.x, new_y_offset)) {
+                                scroll_state.y_flipped = y_flipped;
+                            }
+                        }
+                        // Handle case where list is initially flipped.
+                        None if y_flipped => {
+                            if base_handle.try_set_offset(point(offset.x, Pixels::MIN)) {
+                                scroll_state.y_flipped = y_flipped;
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-                // Handle case where list is initially flipped.
-                None if y_flipped => {
-                    base_handle.set_offset(point(offset.x, Pixels::MIN));
-                    scroll_state.y_flipped = y_flipped;
-                }
-                _ => {}
             }
         }
         self
