@@ -198,8 +198,10 @@ impl PaintingViewer {
             path,
             linear_gradient(
                 180.,
-                linear_color_stop(rgb(0xFACC15), 0.7),
-                linear_color_stop(rgb(0xD56D0C), 1.),
+                [
+                    linear_color_stop(rgb(0xFACC15), 0.7),
+                    linear_color_stop(rgb(0xD56D0C), 1.),
+                ],
             )
             .color_space(ColorSpace::Oklab),
         ));
@@ -229,8 +231,10 @@ impl PaintingViewer {
             path,
             linear_gradient(
                 180.,
-                linear_color_stop(gpui::blue(), 0.4),
-                linear_color_stop(gpui::red(), 1.),
+                [
+                    linear_color_stop(gpui::blue(), 0.4),
+                    linear_color_stop(gpui::red(), 1.),
+                ],
             ),
         ));
 
@@ -367,7 +371,7 @@ impl Render for PaintingViewer {
                                     window.paint_quad(quad(
                                         *bounds,
                                         px(0.),
-                                        *color,
+                                        color.clone(),
                                         px(0.),
                                         gpui::transparent_black(),
                                         Default::default(),
