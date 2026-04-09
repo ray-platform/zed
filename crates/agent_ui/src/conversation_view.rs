@@ -2102,8 +2102,10 @@ impl ConversationView {
             .border_color(cx.theme().colors().border)
             .bg(linear_gradient(
                 180.,
-                linear_color_stop(cx.theme().colors().editor_background.opacity(0.4), 4.),
-                linear_color_stop(cx.theme().status().info_background.opacity(0.), 0.),
+                [
+                    linear_color_stop(cx.theme().colors().editor_background.opacity(0.4), 4.),
+                    linear_color_stop(cx.theme().status().info_background.opacity(0.), 0.),
+                ],
             ))
             .child(
                 v_flex().gap_0p5().child(Label::new(heading_label)).child(

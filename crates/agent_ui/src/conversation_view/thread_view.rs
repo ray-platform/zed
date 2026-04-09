@@ -2692,8 +2692,10 @@ impl ThreadView {
                             .h_full()
                             .child(div().min_w_8().h_full().bg(linear_gradient(
                                 90.,
-                                linear_color_stop(self.activity_bar_bg(cx), 1.),
-                                linear_color_stop(self.activity_bar_bg(cx).opacity(0.2), 0.),
+                                [
+                                    linear_color_stop(self.activity_bar_bg(cx), 1.),
+                                    linear_color_stop(self.activity_bar_bg(cx).opacity(0.2), 0.),
+                                ],
                             )))
                             .child(
                                 div().pr_0p5().bg(self.activity_bar_bg(cx)).child(
@@ -5515,8 +5517,10 @@ impl ThreadView {
                                     .size_full()
                                     .bg(linear_gradient(
                                         180.,
-                                        linear_color_stop(panel_bg.opacity(0.8), 0.),
-                                        linear_color_stop(panel_bg.opacity(0.), 0.1),
+                                        [
+                                            linear_color_stop(panel_bg.opacity(0.8), 0.),
+                                            linear_color_stop(panel_bg.opacity(0.), 0.1),
+                                        ],
                                     ))
                                     .block_mouse_except_scroll(),
                             )
@@ -7169,17 +7173,21 @@ impl ThreadView {
                     if use_card_layout {
                         this.bg(linear_gradient(
                             90.,
-                            linear_color_stop(self.tool_card_header_bg(cx), 1.),
-                            linear_color_stop(self.tool_card_header_bg(cx).opacity(0.2), 0.),
+                            [
+                                linear_color_stop(self.tool_card_header_bg(cx), 1.),
+                                linear_color_stop(self.tool_card_header_bg(cx).opacity(0.2), 0.),
+                            ],
                         ))
                     } else {
                         this.bg(linear_gradient(
                             90.,
-                            linear_color_stop(cx.theme().colors().panel_background, 1.),
-                            linear_color_stop(
-                                cx.theme().colors().panel_background.opacity(0.2),
-                                0.,
-                            ),
+                            [
+                                linear_color_stop(cx.theme().colors().panel_background, 1.),
+                                linear_color_stop(
+                                    cx.theme().colors().panel_background.opacity(0.2),
+                                    0.,
+                                ),
+                            ],
                         ))
                     }
                 })
@@ -7958,8 +7966,10 @@ impl ThreadView {
                 .size_full()
                 .bg(linear_gradient(
                     180.,
-                    linear_color_stop(editor_bg.opacity(0.5), 0.),
-                    linear_color_stop(editor_bg.opacity(0.), 0.1),
+                    [
+                        linear_color_stop(editor_bg.opacity(0.5), 0.),
+                        linear_color_stop(editor_bg.opacity(0.), 0.1),
+                    ],
                 ))
                 .block_mouse_except_scroll()
         };

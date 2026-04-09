@@ -22,6 +22,10 @@ use windows::{
 use crate::directx_renderer::shader_resources::{RawShaderBytes, ShaderModule, ShaderTarget};
 use crate::*;
 use gpui::*;
+use gpui::{
+    BackgroundKind, ColorSpace, ContentMask, Corners, Edges, Hsla, TransformationMatrix,
+    prepare_gradient_stop_color,
+};
 
 pub(crate) const DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSITION";
 const RENDER_TARGET_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -41,6 +45,9 @@ pub(crate) struct DirectXRenderer {
     resources: Option<DirectXResources>,
     globals: DirectXGlobalElements,
     pipelines: DirectXRenderPipelines,
+    quad_gradient_stops: StructuredBuffer<PackedGradientStop>,
+    quad_gradient_stop_count: usize,
+    path_gradient_stops: StructuredBuffer<PackedGradientStop>,
     direct_composition: Option<DirectComposition>,
     font_info: &'static FontInfo,
 
@@ -82,8 +89,8 @@ struct DirectXResources {
 
 struct DirectXRenderPipelines {
     shadow_pipeline: PipelineState<Shadow>,
-    quad_pipeline: PipelineState<Quad>,
-    path_rasterization_pipeline: PipelineState<PathRasterizationSprite>,
+    quad_pipeline: PipelineState<PackedQuad>,
+    path_rasterization_pipeline: PipelineState<PackedPathRasterizationSprite>,
     path_sprite_pipeline: PipelineState<PathSprite>,
     underline_pipeline: PipelineState<Underline>,
     mono_sprites: PipelineState<MonochromeSprite>,
@@ -94,6 +101,12 @@ struct DirectXRenderPipelines {
 struct DirectXGlobalElements {
     global_params_buffer: Option<ID3D11Buffer>,
     sampler: Option<ID3D11SamplerState>,
+}
+
+struct StructuredBuffer<T> {
+    buffer: ID3D11Buffer,
+    buffer_size: usize,
+    _marker: std::marker::PhantomData<T>,
 }
 
 struct DirectComposition {
@@ -149,6 +162,10 @@ impl DirectXRenderer {
             .context("Creating DirectX global elements")?;
         let pipelines = DirectXRenderPipelines::new(&devices.device)
             .context("Creating DirectX render pipelines")?;
+        let quad_gradient_stops = StructuredBuffer::new(&devices.device, 256)
+            .context("Creating quad gradient stop buffer")?;
+        let path_gradient_stops = StructuredBuffer::new(&devices.device, 256)
+            .context("Creating path gradient stop buffer")?;
 
         let direct_composition = if disable_direct_composition {
             None
@@ -168,6 +185,9 @@ impl DirectXRenderer {
             resources: Some(resources),
             globals,
             pipelines,
+            quad_gradient_stops,
+            quad_gradient_stop_count: 0,
+            path_gradient_stops,
             direct_composition,
             font_info: Self::get_font_info(),
             width: 1,
@@ -271,6 +291,10 @@ impl DirectXRenderer {
             .context("Creating DirectXGlobalElements")?;
         let pipelines = DirectXRenderPipelines::new(&devices.device)
             .context("Creating DirectXRenderPipelines")?;
+        let quad_gradient_stops = StructuredBuffer::new(&devices.device, 256)
+            .context("Creating quad gradient stop buffer")?;
+        let path_gradient_stops = StructuredBuffer::new(&devices.device, 256)
+            .context("Creating path gradient stop buffer")?;
 
         let direct_composition = if disable_direct_composition {
             None
@@ -293,6 +317,9 @@ impl DirectXRenderer {
         self.resources = Some(resources);
         self.globals = globals;
         self.pipelines = pipelines;
+        self.quad_gradient_stops = quad_gradient_stops;
+        self.quad_gradient_stop_count = 0;
+        self.path_gradient_stops = path_gradient_stops;
         self.direct_composition = direct_composition;
         self.skip_draws = true;
         Ok(())
@@ -430,11 +457,20 @@ impl DirectXRenderer {
         }
 
         if !scene.quads.is_empty() {
+            let (packed_quads, packed_stops) = pack_quads(&scene.quads);
             self.pipelines.quad_pipeline.update_buffer(
                 &devices.device,
                 &devices.device_context,
-                &scene.quads,
+                &packed_quads,
             )?;
+            self.quad_gradient_stops.update_buffer(
+                &devices.device,
+                &devices.device_context,
+                &packed_stops,
+            )?;
+            self.quad_gradient_stop_count = packed_stops.len();
+        } else {
+            self.quad_gradient_stop_count = 0;
         }
 
         if !scene.underlines.is_empty() {
@@ -499,21 +535,38 @@ impl DirectXRenderer {
             return Ok(());
         }
         let devices = self.devices.as_ref().context("devices missing")?;
-        self.pipelines.quad_pipeline.draw_range(
+        let resources = self.resources.as_ref().context("resources missing")?;
+        let quad_view = create_buffer_view_range(
             &devices.device,
-            &devices.device_context,
-            slice::from_ref(
-                &self
-                    .resources
-                    .as_ref()
-                    .context("resources missing")?
-                    .viewport,
-            ),
-            slice::from_ref(&self.globals.global_params_buffer),
-            4,
+            &self.pipelines.quad_pipeline.buffer,
             start as u32,
             len as u32,
-        )
+        )?;
+        let gradient_stop_view = if self.quad_gradient_stop_count == 0 {
+            None
+        } else {
+            self.quad_gradient_stops.create_range_view(
+                &devices.device,
+                0,
+                self.quad_gradient_stop_count as u32,
+            )?
+        };
+        let shader_resources = [quad_view, gradient_stop_view];
+
+        set_pipeline_state(
+            &devices.device_context,
+            &shader_resources,
+            D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+            slice::from_ref(&resources.viewport),
+            &self.pipelines.quad_pipeline.vertex,
+            &self.pipelines.quad_pipeline.fragment,
+            slice::from_ref(&self.globals.global_params_buffer),
+            &self.pipelines.quad_pipeline.blend_state,
+        );
+        unsafe {
+            devices.device_context.DrawInstanced(4, len as u32, 0, 0);
+        }
+        Ok(())
     }
 
     fn draw_paths_to_intermediate(&mut self, paths: &[Path<ScaledPixels>]) -> Result<()> {
@@ -538,12 +591,14 @@ impl DirectXRenderer {
 
         // Collect all vertices and sprites for a single draw call
         let mut vertices = Vec::new();
+        let mut gradient_stops = Vec::new();
 
         for path in paths {
-            vertices.extend(path.vertices.iter().map(|v| PathRasterizationSprite {
+            let background = pack_background(&path.color, &mut gradient_stops);
+            vertices.extend(path.vertices.iter().map(|v| PackedPathRasterizationSprite {
                 xy_position: v.xy_position,
                 st_position: v.st_position,
-                color: path.color,
+                background,
                 bounds: path.clipped_bounds(),
             }));
         }
@@ -553,15 +608,42 @@ impl DirectXRenderer {
             &devices.device_context,
             &vertices,
         )?;
-
-        self.pipelines.path_rasterization_pipeline.draw(
+        self.path_gradient_stops.update_buffer(
+            &devices.device,
             &devices.device_context,
-            slice::from_ref(&resources.viewport),
-            slice::from_ref(&self.globals.global_params_buffer),
-            D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
-            vertices.len() as u32,
-            1,
+            &gradient_stops,
         )?;
+
+        let vertex_view = create_buffer_view_range(
+            &devices.device,
+            &self.pipelines.path_rasterization_pipeline.buffer,
+            0,
+            vertices.len() as u32,
+        )?;
+        let gradient_stop_view = if gradient_stops.is_empty() {
+            None
+        } else {
+            self.path_gradient_stops.create_range_view(
+                &devices.device,
+                0,
+                gradient_stops.len() as u32,
+            )?
+        };
+        let shader_resources = [vertex_view, gradient_stop_view];
+
+        set_pipeline_state(
+            &devices.device_context,
+            &shader_resources,
+            D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+            slice::from_ref(&resources.viewport),
+            &self.pipelines.path_rasterization_pipeline.vertex,
+            &self.pipelines.path_rasterization_pipeline.fragment,
+            slice::from_ref(&self.globals.global_params_buffer),
+            &self.pipelines.path_rasterization_pipeline.blend_state,
+        );
+        unsafe {
+            devices.device_context.Draw(vertices.len() as u32, 0);
+        }
 
         // Resolve MSAA to non-MSAA intermediate texture
         unsafe {
@@ -1120,31 +1202,6 @@ impl<T> PipelineState<T> {
         update_buffer(device_context, &self.buffer, data)
     }
 
-    fn draw(
-        &self,
-        device_context: &ID3D11DeviceContext,
-        viewport: &[D3D11_VIEWPORT],
-        global_params: &[Option<ID3D11Buffer>],
-        topology: D3D_PRIMITIVE_TOPOLOGY,
-        vertex_count: u32,
-        instance_count: u32,
-    ) -> Result<()> {
-        set_pipeline_state(
-            device_context,
-            slice::from_ref(&self.view),
-            topology,
-            viewport,
-            &self.vertex,
-            &self.fragment,
-            global_params,
-            &self.blend_state,
-        );
-        unsafe {
-            device_context.DrawInstanced(vertex_count, instance_count, 0, 0);
-        }
-        Ok(())
-    }
-
     fn draw_with_texture(
         &self,
         device_context: &ID3D11DeviceContext,
@@ -1233,12 +1290,156 @@ impl<T> PipelineState<T> {
     }
 }
 
+impl<T> StructuredBuffer<T> {
+    fn new(device: &ID3D11Device, buffer_size: usize) -> Result<Self> {
+        Ok(Self {
+            buffer: create_buffer(device, std::mem::size_of::<T>(), buffer_size)?,
+            buffer_size,
+            _marker: std::marker::PhantomData,
+        })
+    }
+
+    fn update_buffer(
+        &mut self,
+        device: &ID3D11Device,
+        device_context: &ID3D11DeviceContext,
+        data: &[T],
+    ) -> Result<()> {
+        if self.buffer_size < data.len() {
+            let new_buffer_size = data.len().next_power_of_two();
+            self.buffer = create_buffer(device, std::mem::size_of::<T>(), new_buffer_size)?;
+            self.buffer_size = new_buffer_size;
+        }
+
+        update_buffer(device_context, &self.buffer, data)
+    }
+
+    fn create_range_view(
+        &self,
+        device: &ID3D11Device,
+        first_element: u32,
+        num_elements: u32,
+    ) -> Result<Option<ID3D11ShaderResourceView>> {
+        create_buffer_view_range(device, &self.buffer, first_element, num_elements)
+    }
+}
+
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct PathRasterizationSprite {
+struct PackedGradientStop {
+    prepared_color: [f32; 4],
+    percentage: f32,
+    _pad: [f32; 3],
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct PackedBackground {
+    tag: u32,
+    color_space: u32,
+    solid: Hsla,
+    gradient_angle_or_pattern_height: f32,
+    stop_offset: u32,
+    stop_count: u32,
+    _pad: [u32; 2],
+}
+
+#[derive(Clone)]
+#[repr(C)]
+struct PackedQuad {
+    order: u32,
+    border_style: u32,
+    bounds: Bounds<ScaledPixels>,
+    content_mask: ContentMask<ScaledPixels>,
+    background: PackedBackground,
+    border_color: Hsla,
+    corner_radii: Corners<ScaledPixels>,
+    border_widths: Edges<ScaledPixels>,
+    transformation: TransformationMatrix,
+}
+
+fn pack_quads(quads: &[Quad]) -> (Vec<PackedQuad>, Vec<PackedGradientStop>) {
+    let mut gradient_stops = Vec::new();
+    let packed_quads = quads
+        .iter()
+        .map(|quad| PackedQuad {
+            order: quad.order,
+            border_style: quad.border_style as u32,
+            bounds: quad.bounds,
+            content_mask: quad.content_mask.clone(),
+            background: pack_background(&quad.background, &mut gradient_stops),
+            border_color: quad.border_color,
+            corner_radii: quad.corner_radii,
+            border_widths: quad.border_widths,
+            transformation: quad.transformation,
+        })
+        .collect();
+
+    (packed_quads, gradient_stops)
+}
+
+fn pack_background(
+    background: &Background,
+    gradient_stops: &mut Vec<PackedGradientStop>,
+) -> PackedBackground {
+    let (stop_offset, stop_count) = match background.kind() {
+        BackgroundKind::LinearGradient => {
+            let stop_offset = gradient_stops.len() as u32;
+            let color_space = background.interpolation_color_space();
+            gradient_stops.extend(
+                background
+                    .gradient_stops()
+                    .iter()
+                    .map(|stop| pack_gradient_stop(*stop, color_space)),
+            );
+            (stop_offset, background.gradient_stops().len() as u32)
+        }
+        BackgroundKind::Solid | BackgroundKind::PatternSlash | BackgroundKind::Checkerboard => {
+            (0, 0)
+        }
+    };
+
+    PackedBackground {
+        tag: background_kind_to_u32(background.kind()),
+        color_space: color_space_to_u32(background.interpolation_color_space()),
+        solid: background.solid_color(),
+        gradient_angle_or_pattern_height: background.angle_or_pattern_value(),
+        stop_offset,
+        stop_count,
+        _pad: [0, 0],
+    }
+}
+
+fn pack_gradient_stop(stop: LinearColorStop, color_space: ColorSpace) -> PackedGradientStop {
+    PackedGradientStop {
+        prepared_color: prepare_gradient_stop_color(stop.color, color_space),
+        percentage: stop.percentage,
+        _pad: [0.0; 3],
+    }
+}
+
+fn background_kind_to_u32(kind: BackgroundKind) -> u32 {
+    match kind {
+        BackgroundKind::Solid => 0,
+        BackgroundKind::LinearGradient => 1,
+        BackgroundKind::PatternSlash => 2,
+        BackgroundKind::Checkerboard => 3,
+    }
+}
+
+fn color_space_to_u32(color_space: ColorSpace) -> u32 {
+    match color_space {
+        ColorSpace::Srgb => 0,
+        ColorSpace::Oklab => 1,
+    }
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct PackedPathRasterizationSprite {
     xy_position: Point<ScaledPixels>,
     st_position: Point<f32>,
-    color: Background,
+    background: PackedBackground,
     bounds: Bounds<ScaledPixels>,
 }
 

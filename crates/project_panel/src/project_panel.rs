@@ -6463,8 +6463,10 @@ impl ProjectPanel {
                             .w_full()
                             .bg(linear_gradient(
                                 0.,
-                                linear_color_stop(shadow_color_top, 1.),
-                                linear_color_stop(shadow_color_bottom, 0.),
+                                [
+                                    linear_color_stop(shadow_color_top, 1.),
+                                    linear_color_stop(shadow_color_bottom, 0.),
+                                ],
                             ));
                         this.child(sticky_shadow)
                     })

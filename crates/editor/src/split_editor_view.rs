@@ -533,8 +533,10 @@ impl SplitBufferHeadersElement {
                     .h(FILE_HEADER_HEIGHT as f32 * line_height)
                     .bg(linear_gradient(
                         0.,
-                        linear_color_stop(editor_bg_color.opacity(0.), 0.),
-                        linear_color_stop(editor_bg_color, 0.6),
+                        [
+                            linear_color_stop(editor_bg_color.opacity(0.), 0.),
+                            linear_color_stop(editor_bg_color, 0.6),
+                        ],
                     ))
                     .absolute()
                     .top_0(),

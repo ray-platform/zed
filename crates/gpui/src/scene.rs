@@ -859,7 +859,7 @@ impl Path<Pixels> {
             start: self.start.map(|start| start.scale(factor)),
             current: self.current.scale(factor),
             contour_count: self.contour_count,
-            color: self.color,
+            color: self.color.clone(),
         }
     }
 
@@ -962,7 +962,7 @@ impl Path<ScaledPixels> {
                 .iter()
                 .map(|vertex| vertex.with_content_mask(content_mask.clone()))
                 .collect(),
-            color: self.color,
+            color: self.color.clone(),
             start: self.start,
             current: self.current,
             contour_count: self.contour_count,
@@ -985,7 +985,7 @@ impl Path<ScaledPixels> {
                 .iter()
                 .map(|vertex| vertex.transformed(transformation, content_mask.clone()))
                 .collect(),
-            color: self.color,
+            color: self.color.clone(),
             start: transformation.apply_to_scaled_point(self.start),
             current: transformation.apply_to_scaled_point(self.current),
             contour_count: self.contour_count,

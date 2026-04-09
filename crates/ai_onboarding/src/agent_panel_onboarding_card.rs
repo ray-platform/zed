@@ -54,8 +54,10 @@ impl RenderOnce for AgentPanelOnboardingCard {
                                 .overflow_hidden()
                                 .bg(linear_gradient(
                                     360.,
-                                    linear_color_stop(color.panel_background, 1.0),
-                                    linear_color_stop(color.editor_background, 0.45),
+                                    [
+                                        linear_color_stop(color.panel_background, 1.0),
+                                        linear_color_stop(color.editor_background, 0.45),
+                                    ],
                                 )),
                         )
                         .children(self.children),

@@ -731,15 +731,18 @@ impl Style {
                 window.paint_shadows(bounds, corner_radii, &self.box_shadow);
 
                 let background_color = self.background.as_ref().and_then(Fill::color);
-                if background_color.is_some_and(|color| !color.is_transparent()) {
+                if background_color
+                    .as_ref()
+                    .is_some_and(|color| !color.is_transparent())
+                {
                     let mut border_color = match background_color {
-                        Some(color) => match color.tag {
+                        Some(ref color) => match color.tag {
                             BackgroundTag::Solid
                             | BackgroundTag::PatternSlash
                             | BackgroundTag::Checkerboard => color.solid,
 
                             BackgroundTag::LinearGradient => color
-                                .colors
+                                .stops
                                 .first()
                                 .map(|stop| stop.color)
                                 .unwrap_or_default(),
@@ -750,7 +753,7 @@ impl Style {
                     window.paint_quad(quad(
                         bounds,
                         corner_radii,
-                        background_color.unwrap_or_default(),
+                        background_color.clone().unwrap_or_default(),
                         Edges::default(),
                         border_color,
                         self.border_style,
@@ -944,7 +947,7 @@ impl Fill {
     /// If the fill is not a solid color, this method returns `None`.
     pub fn color(&self) -> Option<Background> {
         match self {
-            Fill::Color(color) => Some(*color),
+            Fill::Color(color) => Some(color.clone()),
         }
     }
 }

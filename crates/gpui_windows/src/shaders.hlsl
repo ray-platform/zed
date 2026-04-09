@@ -41,29 +41,26 @@ struct Hsla {
     float a;
 };
 
-struct LinearColorStop {
-    Hsla color;
+struct GradientStop {
+    float4 prepared_color;
     float percentage;
+    float3 pad;
 };
 
 struct Background {
     // 0u is Solid
     // 1u is LinearGradient
     // 2u is PatternSlash
+    // 3u is Checkerboard
     uint tag;
     // 0u is sRGB linear color
     // 1u is Oklab color
     uint color_space;
     Hsla solid;
     float gradient_angle_or_pattern_height;
-    LinearColorStop colors[2];
-    uint pad;
-};
-
-struct GradientColor {
-  float4 solid;
-  float4 color0;
-  float4 color1;
+    uint stop_offset;
+    uint stop_count;
+    uint2 pad;
 };
 
 struct AtlasTextureId {
@@ -307,37 +304,69 @@ float quad_sdf(float2 pt, Bounds bounds, Corners corner_radii) {
     return quad_sdf_impl(corner_center_to_point, corner_radius);
 }
 
-GradientColor prepare_gradient_color(uint tag, uint color_space, Hsla solid, LinearColorStop colors[2]) {
-    GradientColor output;
-    if (tag == 0 || tag == 2 || tag == 3) {
-        output.solid = hsla_to_rgba(solid);
-    } else if (tag == 1) {
-        output.color0 = hsla_to_rgba(colors[0].color);
-        output.color1 = hsla_to_rgba(colors[1].color);
-
-        // Prepare color space in vertex for avoid conversion
-        // in fragment shader for performance reasons
-        if (color_space == 1) {
-            // Oklab
-            output.color0 = srgb_to_oklab(output.color0);
-            output.color1 = srgb_to_oklab(output.color1);
-        }
-    }
-
-    return output;
-}
-
 float2x2 rotate2d(float angle) {
     float s = sin(angle);
     float c = cos(angle);
     return float2x2(c, -s, s, c);
 }
 
+StructuredBuffer<GradientStop> gradient_stops: register(t2);
+
+float4 resolve_gradient_color(Background background, float t) {
+    if (background.stop_count == 0) {
+        return hsla_to_rgba(background.solid);
+    }
+
+    GradientStop first_stop = gradient_stops[background.stop_offset];
+    if (t <= first_stop.percentage) {
+        return first_stop.prepared_color;
+    }
+
+    GradientStop last_stop = gradient_stops[background.stop_offset + background.stop_count - 1];
+    if (t >= last_stop.percentage) {
+        return last_stop.prepared_color;
+    }
+
+    [loop]
+    for (uint i = 0; i + 1 < background.stop_count; i++) {
+        GradientStop current_stop = gradient_stops[background.stop_offset + i];
+        GradientStop next_stop = gradient_stops[background.stop_offset + i + 1];
+        if (t <= next_stop.percentage) {
+            if (next_stop.percentage == current_stop.percentage) {
+                return next_stop.prepared_color;
+            }
+
+            float segment_t = clamp(
+                (t - current_stop.percentage) / (next_stop.percentage - current_stop.percentage),
+                0.0,
+                1.0
+            );
+
+            switch (background.color_space) {
+                case 1:
+                    return oklab_to_srgb(lerp(
+                        current_stop.prepared_color,
+                        next_stop.prepared_color,
+                        segment_t
+                    ));
+                default:
+                    return lerp(
+                        current_stop.prepared_color,
+                        next_stop.prepared_color,
+                        segment_t
+                    );
+            }
+        }
+    }
+
+    return last_stop.prepared_color;
+}
+
 float4 gradient_color(Background background,
                       float2 position,
-                      Bounds bounds,
-                      float4 solid_color, float4 color0, float4 color1) {
+                      Bounds bounds) {
     float4 color;
+    float4 solid_color = hsla_to_rgba(background.solid);
 
     switch (background.tag) {
         case 0:
@@ -368,22 +397,7 @@ float4 gradient_color(Background background,
                 t = (t + half_size.y) / bounds.size.y;
             }
 
-            // Adjust t based on the stop percentages
-            t = (t - background.colors[0].percentage)
-                / (background.colors[1].percentage
-                - background.colors[0].percentage);
-            t = clamp(t, 0.0, 1.0);
-
-            switch (background.color_space) {
-                case 0:
-                    color = lerp(color0, color1, t);
-                    break;
-                case 1: {
-                    float4 oklab_color = lerp(color0, color1, t);
-                    color = oklab_to_srgb(oklab_color);
-                    break;
-                }
-            }
+            color = resolve_gradient_color(background, t);
 
             // Dither to reduce banding in gradients (especially dark/alpha).
             // Triangular-distributed noise breaks up 8-bit quantization steps.
@@ -507,10 +521,7 @@ struct QuadVertexOutput {
     nointerpolation uint quad_id: TEXCOORD0;
     float4 position: SV_Position;
     nointerpolation float4 border_color: COLOR0;
-    nointerpolation float4 background_solid: COLOR1;
-    nointerpolation float4 background_color0: COLOR2;
-    nointerpolation float4 background_color1: COLOR3;
-    float2 local_position: TEXCOORD4;
+    float2 local_position: TEXCOORD1;
     float4 clip_distance: SV_ClipDistance;
 };
 
@@ -518,10 +529,7 @@ struct QuadFragmentInput {
     nointerpolation uint quad_id: TEXCOORD0;
     float4 position: SV_Position;
     nointerpolation float4 border_color: COLOR0;
-    nointerpolation float4 background_solid: COLOR1;
-    nointerpolation float4 background_color0: COLOR2;
-    nointerpolation float4 background_color1: COLOR3;
-    float2 local_position: TEXCOORD4;
+    float2 local_position: TEXCOORD1;
 };
 
 StructuredBuffer<Quad> quads: register(t1);
@@ -531,13 +539,6 @@ QuadVertexOutput quad_vertex(uint vertex_id: SV_VertexID, uint quad_id: SV_Insta
     Quad quad = quads[quad_id];
     float2 local_position = unit_vertex * quad.bounds.size + quad.bounds.origin;
     float4 device_position = to_device_position_transformed(unit_vertex, quad.bounds, quad.transformation);
-
-    GradientColor gradient = prepare_gradient_color(
-        quad.background.tag,
-        quad.background.color_space,
-        quad.background.solid,
-        quad.background.colors
-    );
     float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, quad.bounds, quad.content_mask, quad.transformation);
     float4 border_color = hsla_to_rgba(quad.border_color);
 
@@ -545,9 +546,6 @@ QuadVertexOutput quad_vertex(uint vertex_id: SV_VertexID, uint quad_id: SV_Insta
     output.position = device_position;
     output.border_color = border_color;
     output.quad_id = quad_id;
-    output.background_solid = gradient.solid;
-    output.background_color0 = gradient.color0;
-    output.background_color1 = gradient.color1;
     output.local_position = local_position;
     output.clip_distance = clip_distance;
     return output;
@@ -555,8 +553,7 @@ QuadVertexOutput quad_vertex(uint vertex_id: SV_VertexID, uint quad_id: SV_Insta
 
 float4 quad_fragment(QuadFragmentInput input): SV_Target {
     Quad quad = quads[input.quad_id];
-    float4 background_color = gradient_color(quad.background, input.local_position, quad.bounds,
-    input.background_solid, input.background_color0, input.background_color1);
+    float4 background_color = gradient_color(quad.background, input.local_position, quad.bounds);
 
     bool unrounded = quad.corner_radii.top_left == 0.0 &&
         quad.corner_radii.top_right == 0.0 &&
@@ -941,7 +938,7 @@ float4 shadow_fragment(ShadowFragmentInput input): SV_TARGET {
 struct PathRasterizationSprite {
     float2 xy_position;
     float2 st_position;
-    Background color;
+    Background background;
     Bounds bounds;
 };
 
@@ -977,7 +974,7 @@ float4 path_rasterization_fragment(PathFragmentInput input): SV_Target {
     float2 dy = ddy(input.st_position);
     PathRasterizationSprite sprite = path_rasterization_sprites[input.vertex_id];
 
-    Background background = sprite.color;
+    Background background = sprite.background;
     Bounds bounds = sprite.bounds;
 
     float alpha;
@@ -990,11 +987,7 @@ float4 path_rasterization_fragment(PathFragmentInput input): SV_Target {
         alpha = saturate(0.5 - distance);
     }
 
-    GradientColor gradient = prepare_gradient_color(
-        background.tag, background.color_space, background.solid, background.colors);
-
-    float4 color = gradient_color(background, input.position.xy, bounds,
-        gradient.solid, gradient.color0, gradient.color1);
+    float4 color = gradient_color(background, input.position.xy, bounds);
     return float4(color.rgb * color.a * alpha, alpha * color.a);
 }
 

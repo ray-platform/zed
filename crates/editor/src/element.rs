@@ -4540,8 +4540,10 @@ impl EditorElement {
                     .h(FILE_HEADER_HEIGHT as f32 * line_height)
                     .bg(linear_gradient(
                         0.,
-                        linear_color_stop(editor_bg_color.opacity(0.), 0.),
-                        linear_color_stop(editor_bg_color, 0.6),
+                        [
+                            linear_color_stop(editor_bg_color.opacity(0.), 0.),
+                            linear_color_stop(editor_bg_color, 0.6),
+                        ],
                     ))
                     .absolute()
                     .top_0(),
@@ -7993,7 +7995,9 @@ pub fn render_breadcrumb_text(
     });
 
     let breadcrumbs = Itertools::intersperse_with(highlighted_segments, || {
-        Label::new("›").color(Color::Placeholder).into_any_element()
+        Label::new("›")
+            .color(Color::Placeholder)
+            .into_any_element()
     });
 
     let breadcrumbs_stack = h_flex()

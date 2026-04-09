@@ -1,9 +1,10 @@
 use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
-    AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, MonochromeSprite, Path, Point,
-    PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, SubpixelSprite,
-    Underline, get_gamma_correction_ratios,
+    AtlasTextureId, Background, BackgroundKind, Bounds, ColorSpace, Corners, DevicePixels, Edges,
+    GpuSpecs, Hsla, MonochromeSprite, Path, Point, PolychromeSprite, PrimitiveBatch, Quad,
+    ScaledPixels, Scene, Shadow, Size, SubpixelSprite, TransformationMatrix, Underline,
+    get_gamma_correction_ratios, prepare_gradient_stop_color,
 };
 use image::RgbaImage;
 use log::warn;
@@ -13,6 +14,7 @@ use std::cell::RefCell;
 use std::num::NonZeroU64;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
+use std::{mem::align_of, mem::offset_of, mem::size_of};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -23,7 +25,7 @@ struct GlobalParams {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct PodBounds {
     origin: [f32; 2],
     size: [f32; 2],
@@ -54,19 +56,184 @@ struct GammaParams {
     _pad: [f32; 2],
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 #[repr(C)]
 struct PathSprite {
-    bounds: Bounds<ScaledPixels>,
+    bounds: PodBounds,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 #[repr(C)]
-struct PathRasterizationVertex {
-    xy_position: Point<ScaledPixels>,
-    st_position: Point<f32>,
-    color: Background,
-    bounds: Bounds<ScaledPixels>,
+struct PackedGradientStop {
+    prepared_color: [f32; 4],
+    percentage: f32,
+    _pad: [f32; 3],
+}
+
+// Keep this in sync with the WGSL GradientStop layout.
+const MIN_GRADIENT_STOP_BINDING_SIZE: u64 = size_of::<PackedGradientStop>() as u64;
+const _: [(); 32] = [(); size_of::<PackedGradientStop>()];
+
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[repr(C)]
+struct PackedTransformationMatrix {
+    rotation_scale: [[f32; 2]; 2],
+    translation: [f32; 2],
+}
+
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[repr(C, align(8))]
+struct PackedBackground {
+    tag: u32,
+    color_space: u32,
+    solid: [f32; 4],
+    gradient_angle_or_pattern_height: f32,
+    stop_offset: u32,
+    stop_count: u32,
+    _pad: [u32; 3],
+}
+
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[repr(C)]
+struct PackedQuad {
+    order: u32,
+    border_style: u32,
+    bounds: PodBounds,
+    content_mask: PodBounds,
+    background: PackedBackground,
+    border_color: [f32; 4],
+    corner_radii: [f32; 4],
+    border_widths: [f32; 4],
+    transformation: PackedTransformationMatrix,
+}
+
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[repr(C)]
+struct PackedPathRasterizationVertex {
+    xy_position: [f32; 2],
+    st_position: [f32; 2],
+    background: PackedBackground,
+    bounds: PodBounds,
+}
+
+const _: [(); 16] = [(); size_of::<PodBounds>()];
+const _: [(); 24] = [(); size_of::<PackedTransformationMatrix>()];
+const _: [(); 48] = [(); size_of::<PackedBackground>()];
+const _: [(); 8] = [(); align_of::<PackedBackground>()];
+const _: [(); 160] = [(); size_of::<PackedQuad>()];
+const _: [(); 40] = [(); offset_of!(PackedQuad, background)];
+const _: [(); 88] = [(); offset_of!(PackedQuad, border_color)];
+const _: [(); 136] = [(); offset_of!(PackedQuad, transformation)];
+const _: [(); 80] = [(); size_of::<PackedPathRasterizationVertex>()];
+const _: [(); 16] = [(); offset_of!(PackedPathRasterizationVertex, background)];
+const _: [(); 64] = [(); offset_of!(PackedPathRasterizationVertex, bounds)];
+
+fn pack_quads(quads: &[Quad]) -> (Vec<PackedQuad>, Vec<PackedGradientStop>) {
+    let mut gradient_stops = Vec::new();
+    let packed_quads = quads
+        .iter()
+        .map(|quad| PackedQuad {
+            order: quad.order,
+            border_style: quad.border_style as u32,
+            bounds: quad.bounds.into(),
+            content_mask: quad.content_mask.bounds.into(),
+            background: pack_background(&quad.background, &mut gradient_stops),
+            border_color: pack_hsla(quad.border_color),
+            corner_radii: pack_corners(quad.corner_radii),
+            border_widths: pack_edges(quad.border_widths),
+            transformation: pack_transformation(quad.transformation),
+        })
+        .collect();
+
+    (packed_quads, gradient_stops)
+}
+
+fn pack_background(
+    background: &Background,
+    gradient_stops: &mut Vec<PackedGradientStop>,
+) -> PackedBackground {
+    let (stop_offset, stop_count) = match background.kind() {
+        BackgroundKind::LinearGradient => {
+            let stop_offset = gradient_stops.len() as u32;
+            let color_space = background.interpolation_color_space();
+            gradient_stops.extend(
+                background
+                    .gradient_stops()
+                    .iter()
+                    .map(|stop| pack_gradient_stop(*stop, color_space)),
+            );
+            (stop_offset, background.gradient_stops().len() as u32)
+        }
+        BackgroundKind::Solid | BackgroundKind::PatternSlash | BackgroundKind::Checkerboard => {
+            (0, 0)
+        }
+    };
+
+    PackedBackground {
+        tag: background_kind_to_u32(background.kind()),
+        color_space: color_space_to_u32(background.interpolation_color_space()),
+        solid: pack_hsla(background.solid_color()),
+        gradient_angle_or_pattern_height: background.angle_or_pattern_value(),
+        stop_offset,
+        stop_count,
+        _pad: [0, 0, 0],
+    }
+}
+
+fn pack_gradient_stop(stop: gpui::LinearColorStop, color_space: ColorSpace) -> PackedGradientStop {
+    PackedGradientStop {
+        prepared_color: prepare_gradient_stop_color(stop.color, color_space),
+        percentage: stop.percentage,
+        _pad: [0.0; 3],
+    }
+}
+
+fn pack_hsla(color: Hsla) -> [f32; 4] {
+    [color.h, color.s, color.l, color.a]
+}
+
+fn pack_corners(corners: Corners<ScaledPixels>) -> [f32; 4] {
+    [
+        corners.top_left.0,
+        corners.top_right.0,
+        corners.bottom_right.0,
+        corners.bottom_left.0,
+    ]
+}
+
+fn pack_edges(edges: Edges<ScaledPixels>) -> [f32; 4] {
+    [edges.top.0, edges.right.0, edges.bottom.0, edges.left.0]
+}
+
+fn pack_point(point: Point<ScaledPixels>) -> [f32; 2] {
+    [point.x.0, point.y.0]
+}
+
+fn pack_point_f32(point: Point<f32>) -> [f32; 2] {
+    [point.x, point.y]
+}
+
+fn pack_transformation(transformation: TransformationMatrix) -> PackedTransformationMatrix {
+    PackedTransformationMatrix {
+        rotation_scale: transformation.rotation_scale,
+        translation: transformation.translation,
+    }
+}
+
+fn background_kind_to_u32(kind: BackgroundKind) -> u32 {
+    match kind {
+        BackgroundKind::Solid => 0,
+        BackgroundKind::LinearGradient => 1,
+        BackgroundKind::PatternSlash => 2,
+        BackgroundKind::Checkerboard => 3,
+    }
+}
+
+fn color_space_to_u32(color_space: ColorSpace) -> u32 {
+    match color_space {
+        ColorSpace::Srgb => 0,
+        ColorSpace::Oklab => 1,
+    }
 }
 
 pub struct WgpuSurfaceConfig {
@@ -116,6 +283,7 @@ struct WgpuResources {
     globals_bind_group: wgpu::BindGroup,
     path_globals_bind_group: wgpu::BindGroup,
     instance_buffer: wgpu::Buffer,
+    gradient_stop_buffer: wgpu::Buffer,
     path_intermediate_texture: Option<wgpu::Texture>,
     path_intermediate_view: Option<wgpu::TextureView>,
     path_msaa_texture: Option<wgpu::Texture>,
@@ -135,6 +303,7 @@ pub struct WgpuRenderer {
     path_globals_offset: u64,
     gamma_offset: u64,
     instance_buffer_capacity: u64,
+    gradient_stop_buffer_capacity: u64,
     max_buffer_size: u64,
     storage_buffer_alignment: u64,
     rendering_params: RenderingParameters,
@@ -379,9 +548,16 @@ impl WgpuRenderer {
         let max_buffer_size = device.limits().max_buffer_size;
         let storage_buffer_alignment = device.limits().min_storage_buffer_offset_alignment as u64;
         let initial_instance_buffer_capacity = 2 * 1024 * 1024;
+        let initial_gradient_stop_buffer_capacity = 256 * 1024;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("instance_buffer"),
             size: initial_instance_buffer_capacity,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let gradient_stop_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gradient_stop_buffer"),
+            size: initial_gradient_stop_buffer_capacity,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -452,6 +628,7 @@ impl WgpuRenderer {
             globals_bind_group,
             path_globals_bind_group,
             instance_buffer,
+            gradient_stop_buffer,
             // Defer intermediate texture creation to first draw call via ensure_intermediate_textures().
             // This avoids panics when the device/surface is in an invalid state during initialization.
             path_intermediate_texture: None,
@@ -469,6 +646,7 @@ impl WgpuRenderer {
             path_globals_offset,
             gamma_offset,
             instance_buffer_capacity: initial_instance_buffer_capacity,
+            gradient_stop_buffer_capacity: initial_gradient_stop_buffer_capacity,
             max_buffer_size,
             storage_buffer_alignment,
             rendering_params,
@@ -529,7 +707,7 @@ impl WgpuRenderer {
 
         let instances = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("instances_layout"),
-            entries: &[storage_buffer_entry(0)],
+            entries: &[storage_buffer_entry(0), storage_buffer_entry(1)],
         });
 
         let instances_with_texture =
@@ -553,6 +731,7 @@ impl WgpuRenderer {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    storage_buffer_entry(3),
                 ],
             });
 
@@ -1166,15 +1345,17 @@ impl WgpuRenderer {
 
         let width = self.surface_config.width;
         let height = self.surface_config.height;
-        let padded_bytes_per_row =
-            (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let padded_bytes_per_row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         let readback_size = padded_bytes_per_row as u64 * height as u64;
-        let readback = self.resources().device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("capture_readback"),
-            size: readback_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let readback = self
+            .resources()
+            .device
+            .create_buffer(&wgpu::BufferDescriptor {
+                label: Some("capture_readback"),
+                size: readback_size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
 
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -1259,11 +1440,9 @@ impl WgpuRenderer {
         };
 
         let resources = self.resources();
-        resources.queue.write_buffer(
-            &resources.globals_buffer,
-            0,
-            bytemuck::bytes_of(&globals),
-        );
+        resources
+            .queue
+            .write_buffer(&resources.globals_buffer, 0, bytemuck::bytes_of(&globals));
         resources.queue.write_buffer(
             &resources.globals_buffer,
             self.path_globals_offset,
@@ -1283,6 +1462,7 @@ impl WgpuRenderer {
     ) -> anyhow::Result<wgpu::CommandEncoder> {
         loop {
             let mut instance_offset: u64 = 0;
+            let mut gradient_stop_offset: u64 = 0;
             let mut overflow = false;
 
             let mut encoder =
@@ -1310,9 +1490,12 @@ impl WgpuRenderer {
 
                 for batch in scene.batches() {
                     let ok = match batch {
-                        PrimitiveBatch::Quads(range) => {
-                            self.draw_quads(&scene.quads[range], &mut instance_offset, &mut pass)
-                        }
+                        PrimitiveBatch::Quads(range) => self.draw_quads(
+                            &scene.quads[range],
+                            &mut instance_offset,
+                            &mut gradient_stop_offset,
+                            &mut pass,
+                        ),
                         PrimitiveBatch::Shadows(range) => self.draw_shadows(
                             &scene.shadows[range],
                             &mut instance_offset,
@@ -1330,6 +1513,7 @@ impl WgpuRenderer {
                                 &mut encoder,
                                 paths,
                                 &mut instance_offset,
+                                &mut gradient_stop_offset,
                             );
 
                             pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1405,6 +1589,7 @@ impl WgpuRenderer {
                 }
 
                 self.grow_instance_buffer();
+                self.grow_gradient_stop_buffer();
                 continue;
             }
 
@@ -1431,7 +1616,9 @@ impl WgpuRenderer {
                 submission_index: None,
                 timeout: None,
             })
-            .map_err(|error| anyhow::anyhow!("Failed to poll GPU for capture readback: {error:?}"))?;
+            .map_err(|error| {
+                anyhow::anyhow!("Failed to poll GPU for capture readback: {error:?}")
+            })?;
 
         rx.recv()
             .map_err(|_| anyhow::anyhow!("Capture readback channel closed"))?
@@ -1469,16 +1656,49 @@ impl WgpuRenderer {
         &self,
         quads: &[Quad],
         instance_offset: &mut u64,
+        gradient_stop_offset: &mut u64,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> bool {
-        let data = unsafe { Self::instance_bytes(quads) };
-        self.draw_instances(
-            data,
-            quads.len() as u32,
-            &self.resources().pipelines.quads,
-            instance_offset,
-            pass,
-        )
+        if quads.is_empty() {
+            return true;
+        }
+
+        let (packed_quads, packed_stops) = pack_quads(quads);
+        let quad_data = unsafe { Self::instance_bytes(&packed_quads) };
+        let stop_data = unsafe { Self::instance_bytes(&packed_stops) };
+        let Some((quad_offset, quad_size)) =
+            self.write_to_instance_buffer(instance_offset, quad_data)
+        else {
+            return false;
+        };
+        let Some((stop_offset, stop_size)) =
+            self.write_to_gradient_stop_buffer(gradient_stop_offset, stop_data)
+        else {
+            return false;
+        };
+
+        let resources = self.resources();
+        let bind_group = resources
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("quad_instances_bind_group"),
+                layout: &resources.bind_group_layouts.instances,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.instance_binding(quad_offset, quad_size),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.gradient_stop_binding(stop_offset, stop_size),
+                    },
+                ],
+            });
+        pass.set_pipeline(&resources.pipelines.quads);
+        pass.set_bind_group(0, &resources.globals_bind_group, &[]);
+        pass.set_bind_group(1, &bind_group, &[]);
+        pass.draw(0..4, 0..packed_quads.len() as u32);
+        true
     }
 
     fn draw_shadows(
@@ -1596,10 +1816,16 @@ impl WgpuRenderer {
             .create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &resources.bind_group_layouts.instances,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.instance_binding(offset, size),
-                }],
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.instance_binding(offset, size),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.empty_gradient_stop_binding(),
+                    },
+                ],
             });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &resources.globals_bind_group, &[]);
@@ -1642,6 +1868,10 @@ impl WgpuRenderer {
                         binding: 2,
                         resource: wgpu::BindingResource::Sampler(&resources.atlas_sampler),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.empty_gradient_stop_binding(),
+                    },
                 ],
             });
         pass.set_pipeline(pipeline);
@@ -1672,7 +1902,7 @@ impl WgpuRenderer {
             paths
                 .iter()
                 .map(|p| PathSprite {
-                    bounds: p.clipped_bounds(),
+                    bounds: p.clipped_bounds().into(),
                 })
                 .collect()
         } else {
@@ -1680,7 +1910,9 @@ impl WgpuRenderer {
             for path in paths.iter().skip(1) {
                 bounds = bounds.union(&path.clipped_bounds());
             }
-            vec![PathSprite { bounds }]
+            vec![PathSprite {
+                bounds: bounds.into(),
+            }]
         };
 
         let resources = self.resources();
@@ -1704,15 +1936,18 @@ impl WgpuRenderer {
         encoder: &mut wgpu::CommandEncoder,
         paths: &[Path<ScaledPixels>],
         instance_offset: &mut u64,
+        gradient_stop_offset: &mut u64,
     ) -> bool {
         let mut vertices = Vec::new();
+        let mut gradient_stops = Vec::new();
         for path in paths {
             let bounds = path.clipped_bounds();
-            vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {
-                xy_position: v.xy_position,
-                st_position: v.st_position,
-                color: path.color,
-                bounds,
+            let background = pack_background(&path.color, &mut gradient_stops);
+            vertices.extend(path.vertices.iter().map(|v| PackedPathRasterizationVertex {
+                xy_position: pack_point(v.xy_position),
+                st_position: pack_point_f32(v.st_position),
+                background,
+                bounds: bounds.into(),
             }));
         }
 
@@ -1726,6 +1961,12 @@ impl WgpuRenderer {
         else {
             return false;
         };
+        let stop_data = unsafe { Self::instance_bytes(&gradient_stops) };
+        let Some((stop_offset, stop_size)) =
+            self.write_to_gradient_stop_buffer(gradient_stop_offset, stop_data)
+        else {
+            return false;
+        };
 
         let resources = self.resources();
         let data_bind_group = resources
@@ -1733,10 +1974,16 @@ impl WgpuRenderer {
             .create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("path_rasterization_bind_group"),
                 layout: &resources.bind_group_layouts.instances,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.instance_binding(vertex_offset, vertex_size),
-                }],
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.instance_binding(vertex_offset, vertex_size),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.gradient_stop_binding(stop_offset, stop_size),
+                    },
+                ],
             });
 
         let Some(path_intermediate_view) = resources.path_intermediate_view.as_ref() else {
@@ -1787,6 +2034,19 @@ impl WgpuRenderer {
         self.instance_buffer_capacity = new_capacity;
     }
 
+    fn grow_gradient_stop_buffer(&mut self) {
+        let new_capacity = (self.gradient_stop_buffer_capacity * 2).min(self.max_buffer_size);
+        log::info!("increased gradient stop buffer size to {}", new_capacity);
+        let resources = self.resources_mut();
+        resources.gradient_stop_buffer = resources.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gradient_stop_buffer"),
+            size: new_capacity,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.gradient_stop_buffer_capacity = new_capacity;
+    }
+
     fn write_to_instance_buffer(
         &self,
         instance_offset: &mut u64,
@@ -1805,12 +2065,50 @@ impl WgpuRenderer {
         Some((offset, NonZeroU64::new(size).expect("size is at least 16")))
     }
 
+    fn write_to_gradient_stop_buffer(
+        &self,
+        gradient_stop_offset: &mut u64,
+        data: &[u8],
+    ) -> Option<(u64, NonZeroU64)> {
+        if data.is_empty() {
+            return Some((0, NonZeroU64::new(MIN_GRADIENT_STOP_BINDING_SIZE).unwrap()));
+        }
+
+        let offset = (*gradient_stop_offset).next_multiple_of(self.storage_buffer_alignment);
+        let size = (data.len() as u64).max(MIN_GRADIENT_STOP_BINDING_SIZE);
+        if offset + size > self.gradient_stop_buffer_capacity {
+            return None;
+        }
+
+        let resources = self.resources();
+        resources
+            .queue
+            .write_buffer(&resources.gradient_stop_buffer, offset, data);
+        *gradient_stop_offset = offset + size;
+        Some((
+            offset,
+            NonZeroU64::new(size).expect("size is at least one packed gradient stop"),
+        ))
+    }
+
     fn instance_binding(&self, offset: u64, size: NonZeroU64) -> wgpu::BindingResource<'_> {
         wgpu::BindingResource::Buffer(wgpu::BufferBinding {
             buffer: &self.resources().instance_buffer,
             offset,
             size: Some(size),
         })
+    }
+
+    fn gradient_stop_binding(&self, offset: u64, size: NonZeroU64) -> wgpu::BindingResource<'_> {
+        wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: &self.resources().gradient_stop_buffer,
+            offset,
+            size: Some(size),
+        })
+    }
+
+    fn empty_gradient_stop_binding(&self) -> wgpu::BindingResource<'_> {
+        self.gradient_stop_binding(0, NonZeroU64::new(MIN_GRADIENT_STOP_BINDING_SIZE).unwrap())
     }
 
     /// Mark the surface as unconfigured so rendering is skipped until a new

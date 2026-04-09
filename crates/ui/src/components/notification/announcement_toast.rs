@@ -182,14 +182,16 @@ impl Component for AnnouncementToast {
             )
             .child(div().absolute().inset_0().size_full().bg(linear_gradient(
                 0.,
-                linear_color_stop(
-                    cx.theme().colors().elevated_surface_background.opacity(0.1),
-                    0.9,
-                ),
-                linear_color_stop(
-                    cx.theme().colors().elevated_surface_background.opacity(0.),
-                    0.,
-                ),
+                [
+                    linear_color_stop(
+                        cx.theme().colors().elevated_surface_background.opacity(0.1),
+                        0.9,
+                    ),
+                    linear_color_stop(
+                        cx.theme().colors().elevated_surface_background.opacity(0.),
+                        0.,
+                    ),
+                ],
             )))
             .child(
                 div()

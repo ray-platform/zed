@@ -99,8 +99,10 @@ impl Render for AgentNotification {
                 .right_0()
                 .bg(linear_gradient(
                     90.,
-                    linear_color_stop(bg, 1.),
-                    linear_color_stop(bg.opacity(0.2), 0.),
+                    [
+                        linear_color_stop(bg, 1.),
+                        linear_color_stop(bg.opacity(0.2), 0.),
+                    ],
                 ))
         };
 

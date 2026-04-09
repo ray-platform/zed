@@ -67,15 +67,19 @@ impl RenderOnce for GradientFade {
             .h_full()
             .bg(linear_gradient(
                 90.,
-                linear_color_stop(base_bg, stop),
-                linear_color_stop(base_bg.opacity(0.0), 0.),
+                [
+                    linear_color_stop(base_bg, stop),
+                    linear_color_stop(base_bg.opacity(0.0), 0.),
+                ],
             ))
             .when_some(self.group_name.clone(), |element, group_name| {
                 element.group_hover(group_name, move |s| {
                     s.bg(linear_gradient(
                         90.,
-                        linear_color_stop(hover_bg, stop),
-                        linear_color_stop(hover_bg.opacity(0.0), 0.),
+                        [
+                            linear_color_stop(hover_bg, stop),
+                            linear_color_stop(hover_bg.opacity(0.0), 0.),
+                        ],
                     ))
                 })
             })
@@ -83,8 +87,10 @@ impl RenderOnce for GradientFade {
                 element.group_active(group_name, move |s| {
                     s.bg(linear_gradient(
                         90.,
-                        linear_color_stop(active_bg, stop),
-                        linear_color_stop(active_bg.opacity(0.0), 0.),
+                        [
+                            linear_color_stop(active_bg, stop),
+                            linear_color_stop(active_bg.opacity(0.0), 0.),
+                        ],
                     ))
                 })
             })

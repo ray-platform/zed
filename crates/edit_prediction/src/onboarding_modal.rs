@@ -150,8 +150,10 @@ impl Render for ZedPredictModal {
                     .rounded(px(5.))
                     .bg(linear_gradient(
                         360.,
-                        linear_color_stop(color.panel_background, 1.0),
-                        linear_color_stop(color.editor_background, 0.45),
+                        [
+                            linear_color_stop(color.panel_background, 1.0),
+                            linear_color_stop(color.editor_background, 0.45),
+                        ],
                     ))
                     .child(self.onboarding.clone()),
             )

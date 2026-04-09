@@ -3,6 +3,10 @@
 
 using namespace metal;
 
+typedef PackedBackground Background;
+typedef PackedGradientStop GradientStop;
+typedef PackedQuad Quad;
+
 float4 hsla_to_rgba(Hsla hsla);
 float3 srgb_to_linear(float3 color);
 float3 linear_to_srgb(float3 color);
@@ -34,23 +38,22 @@ float blur_along_x(float x, float y, float sigma, float corner,
                    float2 half_size);
 float4 over(float4 below, float4 above);
 float radians(float degrees);
-float4 fill_color(Background background, float2 position, Bounds_ScaledPixels bounds,
-  float4 solid_color, float4 color0, float4 color1);
-
-struct GradientColor {
-  float4 solid;
-  float4 color0;
-  float4 color1;
-};
-GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid, Hsla color0, Hsla color1);
+float4 resolve_gradient_color(
+  Background background,
+  float t,
+  constant GradientStop *gradient_stops
+);
+float4 fill_color(
+  Background background,
+  float2 position,
+  Bounds_ScaledPixels bounds,
+  constant GradientStop *gradient_stops
+);
 
 struct QuadVertexOutput {
   uint quad_id [[flat]];
   float4 position [[position]];
   float4 border_color [[flat]];
-  float4 background_solid [[flat]];
-  float4 background_color0 [[flat]];
-  float4 background_color1 [[flat]];
   float2 local_position;
   float clip_distance [[clip_distance]][4];
 };
@@ -59,9 +62,6 @@ struct QuadFragmentInput {
   uint quad_id [[flat]];
   float4 position [[position]];
   float4 border_color [[flat]];
-  float4 background_solid [[flat]];
-  float4 background_color0 [[flat]];
-  float4 background_color1 [[flat]];
   float2 local_position;
 };
 
@@ -83,31 +83,22 @@ vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
                                                  quad.content_mask.bounds, quad.transformation);
   float4 border_color = hsla_to_rgba(quad.border_color);
 
-  GradientColor gradient = prepare_fill_color(
-    quad.background.tag,
-    quad.background.color_space,
-    quad.background.solid,
-    quad.background.colors[0].color,
-    quad.background.colors[1].color
-  );
-
   return QuadVertexOutput{
       quad_id,
       device_position,
       border_color,
-      gradient.solid,
-      gradient.color0,
-      gradient.color1,
       local_position,
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
 fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
                               constant Quad *quads
-                              [[buffer(QuadInputIndex_Quads)]]) {
+                              [[buffer(QuadInputIndex_Quads)]],
+                              constant GradientStop *gradient_stops
+                              [[buffer(QuadInputIndex_GradientStops)]]) {
   Quad quad = quads[input.quad_id];
-  float4 background_color = fill_color(quad.background, input.local_position, quad.bounds,
-    input.background_solid, input.background_color0, input.background_color1);
+  float4 background_color =
+    fill_color(quad.background, input.local_position, quad.bounds, gradient_stops);
 
   bool unrounded = quad.corner_radii.top_left == 0.0 &&
     quad.corner_radii.bottom_left == 0.0 &&
@@ -781,13 +772,14 @@ vertex PathRasterizationVertexOutput path_rasterization_vertex(
 
 fragment float4 path_rasterization_fragment(
   PathRasterizationFragmentInput input [[stage_in]],
-  constant PathRasterizationVertex *vertices [[buffer(PathRasterizationInputIndex_Vertices)]]
+  constant PathRasterizationVertex *vertices [[buffer(PathRasterizationInputIndex_Vertices)]],
+  constant GradientStop *gradient_stops [[buffer(PathRasterizationInputIndex_GradientStops)]]
 ) {
   float2 dx = dfdx(input.st_position);
   float2 dy = dfdy(input.st_position);
 
   PathRasterizationVertex v = vertices[input.vertex_id];
-  Background background = v.color;
+  Background background = v.background;
   Bounds_ScaledPixels path_bounds = v.bounds;
   float alpha;
   if (length(float2(dx.x, dy.x)) < 0.001) {
@@ -802,21 +794,11 @@ fragment float4 path_rasterization_fragment(
     alpha = saturate(0.5 - distance);
   }
 
-  GradientColor gradient_color = prepare_fill_color(
-    background.tag,
-    background.color_space,
-    background.solid,
-    background.colors[0].color,
-    background.colors[1].color
-  );
-
   float4 color = fill_color(
     background,
     input.position.xy,
     path_bounds,
-    gradient_color.solid,
-    gradient_color.color0,
-    gradient_color.color1
+    gradient_stops
   );
   return float4(color.rgb * color.a * alpha, alpha * color.a);
 }
@@ -1160,38 +1142,73 @@ float4 over(float4 below, float4 above) {
   return result;
 }
 
-GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid,
-                                     Hsla color0, Hsla color1) {
-  GradientColor out;
-  if (tag == 0 || tag == 2 || tag == 3) {
-    out.solid = hsla_to_rgba(solid);
-  } else if (tag == 1) {
-    out.color0 = hsla_to_rgba(color0);
-    out.color1 = hsla_to_rgba(color1);
-
-    // Prepare color space in vertex for avoid conversion
-    // in fragment shader for performance reasons
-    if (color_space == 1) {
-      // Oklab
-      out.color0 = srgb_to_oklab(out.color0);
-      out.color1 = srgb_to_oklab(out.color1);
-    }
-  }
-
-  return out;
-}
-
 float2x2 rotate2d(float angle) {
     float s = sin(angle);
     float c = cos(angle);
     return float2x2(c, -s, s, c);
 }
 
-float4 fill_color(Background background,
-                      float2 position,
-                      Bounds_ScaledPixels bounds,
-                      float4 solid_color, float4 color0, float4 color1) {
+float4 resolve_gradient_color(
+  Background background,
+  float t,
+  constant GradientStop *gradient_stops
+) {
+  if (background.stop_count == 0) {
+    return hsla_to_rgba(background.solid);
+  }
+
+  GradientStop first_stop = gradient_stops[background.stop_offset];
+  if (t <= first_stop.percentage) {
+    return first_stop.prepared_color;
+  }
+
+  GradientStop last_stop = gradient_stops[background.stop_offset + background.stop_count - 1];
+  if (t >= last_stop.percentage) {
+    return last_stop.prepared_color;
+  }
+
+  for (uint i = 0; i + 1 < background.stop_count; ++i) {
+    GradientStop current_stop = gradient_stops[background.stop_offset + i];
+    GradientStop next_stop = gradient_stops[background.stop_offset + i + 1];
+    if (t <= next_stop.percentage) {
+      if (next_stop.percentage == current_stop.percentage) {
+        return next_stop.prepared_color;
+      }
+
+      float segment_t = clamp(
+        (t - current_stop.percentage) / (next_stop.percentage - current_stop.percentage),
+        0.0,
+        1.0
+      );
+
+      switch (background.color_space) {
+        case 1:
+          return oklab_to_srgb(mix(
+            current_stop.prepared_color,
+            next_stop.prepared_color,
+            segment_t
+          ));
+        default:
+          return mix(
+            current_stop.prepared_color,
+            next_stop.prepared_color,
+            segment_t
+          );
+      }
+    }
+  }
+
+  return last_stop.prepared_color;
+}
+
+float4 fill_color(
+  Background background,
+  float2 position,
+  Bounds_ScaledPixels bounds,
+  constant GradientStop *gradient_stops
+) {
   float4 color;
+  float4 solid_color = hsla_to_rgba(background.solid);
 
   switch (background.tag) {
     case 0:
@@ -1222,22 +1239,7 @@ float4 fill_color(Background background,
           t = (t + half_size.y) / bounds.size.height;
       }
 
-      // Adjust t based on the stop percentages
-      t = (t - background.colors[0].percentage)
-        / (background.colors[1].percentage
-        - background.colors[0].percentage);
-      t = clamp(t, 0.0, 1.0);
-
-      switch (background.color_space) {
-        case 0:
-          color = mix(color0, color1, t);
-          break;
-        case 1: {
-          float4 oklab_color = mix(color0, color1, t);
-          color = oklab_to_srgb(oklab_color);
-          break;
-        }
-      }
+      color = resolve_gradient_color(background, t, gradient_stops);
 
       // Dither to reduce banding in gradients (especially dark/alpha).
       // Triangular-distributed noise breaks up 8-bit quantization steps.

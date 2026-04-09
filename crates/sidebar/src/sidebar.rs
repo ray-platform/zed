@@ -3803,8 +3803,10 @@ impl Sidebar {
             .border_color(cx.theme().colors().border)
             .bg(linear_gradient(
                 360.,
-                linear_color_stop(bg.opacity(0.06), 1.),
-                linear_color_stop(bg.opacity(0.), 0.),
+                [
+                    linear_color_stop(bg.opacity(0.06), 1.),
+                    linear_color_stop(bg.opacity(0.), 0.),
+                ],
             ))
             .child(
                 h_flex()

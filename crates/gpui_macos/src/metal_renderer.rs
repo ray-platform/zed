@@ -7,9 +7,10 @@ use cocoa::{
     quartzcore::AutoresizingMask,
 };
 use gpui::{
-    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, MonochromeSprite, PaintSurface,
-    Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size,
-    Surface, Underline, point, size,
+    AtlasTextureId, Background, BackgroundKind, Bounds, ColorSpace, ContentMask, Corners,
+    DevicePixels, Edges, Hsla, MonochromeSprite, PaintSurface, Path, Point, PolychromeSprite,
+    PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, Surface, TransformationMatrix,
+    Underline, point, prepare_gradient_stop_color, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -135,11 +136,46 @@ pub(crate) struct MetalRenderer {
     path_sample_count: u32,
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct PackedGradientStop {
+    pub prepared_color: [f32; 4],
+    pub percentage: f32,
+    pub pad: [f32; 3],
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct PackedBackground {
+    pub tag: u32,
+    pub color_space: u32,
+    pub solid: Hsla,
+    pub gradient_angle_or_pattern_height: f32,
+    pub stop_offset: u32,
+    pub stop_count: u32,
+    pub pad: [u32; 2],
+}
+
+#[derive(Clone)]
+#[repr(C)]
+pub struct PackedQuad {
+    pub order: u32,
+    pub border_style: u32,
+    pub bounds: Bounds<ScaledPixels>,
+    pub content_mask: ContentMask<ScaledPixels>,
+    pub background: PackedBackground,
+    pub border_color: Hsla,
+    pub corner_radii: Corners<ScaledPixels>,
+    pub border_widths: Edges<ScaledPixels>,
+    pub transformation: TransformationMatrix,
+}
+
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct PathRasterizationVertex {
     pub xy_position: Point<ScaledPixels>,
     pub st_position: Point<f32>,
-    pub color: Background,
+    pub background: PackedBackground,
     pub bounds: Bounds<ScaledPixels>,
 }
 
@@ -907,16 +943,22 @@ impl MetalRenderer {
 
         align_offset(instance_offset);
         let mut vertices = Vec::new();
+        let mut gradient_stops = Vec::new();
         for path in paths {
+            let background = pack_background(&path.color, &mut gradient_stops);
             vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {
                 xy_position: v.xy_position,
                 st_position: v.st_position,
-                color: path.color,
+                background,
                 bounds: path.bounds.intersect(&path.content_mask.bounds),
             }));
         }
         let vertices_bytes_len = mem::size_of_val(vertices.as_slice());
-        let next_offset = *instance_offset + vertices_bytes_len;
+        let vertices_offset = *instance_offset;
+        let mut gradient_stops_offset = vertices_offset + vertices_bytes_len;
+        align_offset(&mut gradient_stops_offset);
+        let gradient_stops_bytes_len = mem::size_of_val(gradient_stops.as_slice());
+        let next_offset = gradient_stops_offset + gradient_stops_bytes_len;
         if next_offset > instance_buffer.size {
             command_encoder.end_encoding();
             return false;
@@ -924,7 +966,7 @@ impl MetalRenderer {
         command_encoder.set_vertex_buffer(
             PathRasterizationInputIndex::Vertices as u64,
             Some(&instance_buffer.metal_buffer),
-            *instance_offset as u64,
+            vertices_offset as u64,
         );
         command_encoder.set_vertex_bytes(
             PathRasterizationInputIndex::ViewportSize as u64,
@@ -934,15 +976,25 @@ impl MetalRenderer {
         command_encoder.set_fragment_buffer(
             PathRasterizationInputIndex::Vertices as u64,
             Some(&instance_buffer.metal_buffer),
-            *instance_offset as u64,
+            vertices_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            PathRasterizationInputIndex::GradientStops as u64,
+            Some(&instance_buffer.metal_buffer),
+            gradient_stops_offset as u64,
         );
         let buffer_contents =
-            unsafe { (instance_buffer.metal_buffer.contents() as *mut u8).add(*instance_offset) };
+            unsafe { (instance_buffer.metal_buffer.contents() as *mut u8).add(vertices_offset) };
         unsafe {
             ptr::copy_nonoverlapping(
                 vertices.as_ptr() as *const u8,
                 buffer_contents,
                 vertices_bytes_len,
+            );
+            ptr::copy_nonoverlapping(
+                gradient_stops.as_ptr() as *const u8,
+                (instance_buffer.metal_buffer.contents() as *mut u8).add(gradient_stops_offset),
+                gradient_stops_bytes_len,
             );
         }
         command_encoder.draw_primitives(
@@ -1038,16 +1090,6 @@ impl MetalRenderer {
             Some(&self.unit_vertices),
             0,
         );
-        command_encoder.set_vertex_buffer(
-            QuadInputIndex::Quads as u64,
-            Some(&instance_buffer.metal_buffer),
-            *instance_offset as u64,
-        );
-        command_encoder.set_fragment_buffer(
-            QuadInputIndex::Quads as u64,
-            Some(&instance_buffer.metal_buffer),
-            *instance_offset as u64,
-        );
 
         command_encoder.set_vertex_bytes(
             QuadInputIndex::ViewportSize as u64,
@@ -1055,24 +1097,51 @@ impl MetalRenderer {
             &viewport_size as *const Size<DevicePixels> as *const _,
         );
 
-        let quad_bytes_len = mem::size_of_val(quads);
-        let buffer_contents =
-            unsafe { (instance_buffer.metal_buffer.contents() as *mut u8).add(*instance_offset) };
-
-        let next_offset = *instance_offset + quad_bytes_len;
+        let (packed_quads, gradient_stops) = pack_quads(quads);
+        let quads_offset = *instance_offset;
+        let quad_bytes_len = mem::size_of_val(packed_quads.as_slice());
+        let mut gradient_stops_offset = quads_offset + quad_bytes_len;
+        align_offset(&mut gradient_stops_offset);
+        let gradient_stops_bytes_len = mem::size_of_val(gradient_stops.as_slice());
+        let next_offset = gradient_stops_offset + gradient_stops_bytes_len;
         if next_offset > instance_buffer.size {
             return false;
         }
 
+        command_encoder.set_vertex_buffer(
+            QuadInputIndex::Quads as u64,
+            Some(&instance_buffer.metal_buffer),
+            quads_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            QuadInputIndex::Quads as u64,
+            Some(&instance_buffer.metal_buffer),
+            quads_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            QuadInputIndex::GradientStops as u64,
+            Some(&instance_buffer.metal_buffer),
+            gradient_stops_offset as u64,
+        );
+
         unsafe {
-            ptr::copy_nonoverlapping(quads.as_ptr() as *const u8, buffer_contents, quad_bytes_len);
+            ptr::copy_nonoverlapping(
+                packed_quads.as_ptr() as *const u8,
+                (instance_buffer.metal_buffer.contents() as *mut u8).add(quads_offset),
+                quad_bytes_len,
+            );
+            ptr::copy_nonoverlapping(
+                gradient_stops.as_ptr() as *const u8,
+                (instance_buffer.metal_buffer.contents() as *mut u8).add(gradient_stops_offset),
+                gradient_stops_bytes_len,
+            );
         }
 
         command_encoder.draw_primitives_instanced(
             metal::MTLPrimitiveType::Triangle,
             0,
             6,
-            quads.len() as u64,
+            packed_quads.len() as u64,
         );
         *instance_offset = next_offset;
         true
@@ -1613,6 +1682,82 @@ fn build_path_rasterization_pipeline_state(
         .expect("could not create render pipeline state")
 }
 
+fn pack_quads(quads: &[Quad]) -> (Vec<PackedQuad>, Vec<PackedGradientStop>) {
+    let mut gradient_stops = Vec::new();
+    let packed_quads = quads
+        .iter()
+        .map(|quad| PackedQuad {
+            order: quad.order,
+            border_style: quad.border_style as u32,
+            bounds: quad.bounds,
+            content_mask: quad.content_mask.clone(),
+            background: pack_background(&quad.background, &mut gradient_stops),
+            border_color: quad.border_color,
+            corner_radii: quad.corner_radii,
+            border_widths: quad.border_widths,
+            transformation: quad.transformation,
+        })
+        .collect();
+
+    (packed_quads, gradient_stops)
+}
+
+fn pack_background(
+    background: &Background,
+    gradient_stops: &mut Vec<PackedGradientStop>,
+) -> PackedBackground {
+    let (stop_offset, stop_count) = match background.kind() {
+        BackgroundKind::LinearGradient => {
+            let stop_offset = gradient_stops.len() as u32;
+            let color_space = background.interpolation_color_space();
+            gradient_stops.extend(
+                background
+                    .gradient_stops()
+                    .iter()
+                    .map(|stop| pack_gradient_stop(*stop, color_space)),
+            );
+            (stop_offset, background.gradient_stops().len() as u32)
+        }
+        BackgroundKind::Solid | BackgroundKind::PatternSlash | BackgroundKind::Checkerboard => {
+            (0, 0)
+        }
+    };
+
+    PackedBackground {
+        tag: background_kind_to_u32(background.kind()),
+        color_space: color_space_to_u32(background.interpolation_color_space()),
+        solid: background.solid_color(),
+        gradient_angle_or_pattern_height: background.angle_or_pattern_value(),
+        stop_offset,
+        stop_count,
+        pad: [0, 0],
+    }
+}
+
+fn pack_gradient_stop(stop: gpui::LinearColorStop, color_space: ColorSpace) -> PackedGradientStop {
+    PackedGradientStop {
+        prepared_color: prepare_gradient_stop_color(stop.color, color_space),
+        percentage: stop.percentage,
+        pad: [0.0; 3],
+    }
+}
+
+fn background_kind_to_u32(kind: BackgroundKind) -> u32 {
+    match kind {
+        BackgroundKind::Solid => 0,
+        BackgroundKind::LinearGradient => 1,
+        BackgroundKind::PatternSlash => 2,
+        BackgroundKind::Checkerboard => 3,
+    }
+}
+
+fn color_space_to_u32(color_space: ColorSpace) -> u32 {
+    match color_space {
+        ColorSpace::Srgb => 0,
+        ColorSpace::Oklab => 1,
+    }
+}
+
 // Align to multiples of 256 make Metal happy.
 fn align_offset(offset: &mut usize) {
     *offset = (*offset).div_ceil(256) * 256;
@@ -1630,6 +1775,7 @@ enum QuadInputIndex {
     Vertices = 0,
     Quads = 1,
     ViewportSize = 2,
+    GradientStops = 3,
 }
 
 #[repr(C)]
@@ -1662,6 +1808,7 @@ enum SurfaceInputIndex {
 enum PathRasterizationInputIndex {
     Vertices = 0,
     ViewportSize = 1,
+    GradientStops = 2,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
