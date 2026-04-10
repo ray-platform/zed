@@ -10,6 +10,8 @@ cbuffer GlobalParams: register(b0) {
 Texture2D<float4> t_sprite: register(t0);
 SamplerState s_sprite: register(s0);
 
+static const uint MAX_GRADIENT_SEARCH_STEPS = 8;
+
 struct SubpixelSpriteFragmentOutput {
     float4 foreground : SV_Target0;
     float4 alpha : SV_Target1;
@@ -346,36 +348,45 @@ float4 resolve_gradient_color(Background background, float t) {
         return last_stop.prepared_color;
     }
 
+    uint lower = 0;
+    uint upper = background.stop_count - 1;
+
     [loop]
-    for (uint i = 0; i + 1 < background.stop_count; i++) {
-        GradientStop current_stop = gradient_stops[background.stop_offset + i];
-        GradientStop next_stop = gradient_stops[background.stop_offset + i + 1];
-        if (t <= next_stop.percentage) {
-            if (next_stop.percentage == current_stop.percentage) {
-                return next_stop.prepared_color;
-            }
-
-            float segment_t = clamp(
-                (t - current_stop.percentage) / (next_stop.percentage - current_stop.percentage),
-                0.0,
-                1.0
-            );
-
-            switch (background.color_space) {
-                case 1:
-                    return oklab_to_srgb(lerp(
-                        current_stop.prepared_color,
-                        next_stop.prepared_color,
-                        segment_t
-                    ));
-                default:
-                    return lerp(
-                        current_stop.prepared_color,
-                        next_stop.prepared_color,
-                        segment_t
-                    );
-            }
+    for (uint step = 0; step < MAX_GRADIENT_SEARCH_STEPS && lower + 1 < upper; step++) {
+        uint mid = lower + (upper - lower) / 2;
+        GradientStop mid_stop = gradient_stops[background.stop_offset + mid];
+        if (t <= mid_stop.percentage) {
+            upper = mid;
+        } else {
+            lower = mid;
         }
+    }
+
+    GradientStop current_stop = gradient_stops[background.stop_offset + lower];
+    GradientStop next_stop = gradient_stops[background.stop_offset + upper];
+    if (next_stop.percentage == current_stop.percentage) {
+        return next_stop.prepared_color;
+    }
+
+    float segment_t = clamp(
+        (t - current_stop.percentage) / (next_stop.percentage - current_stop.percentage),
+        0.0,
+        1.0
+    );
+
+    switch (background.color_space) {
+        case 1:
+            return oklab_to_srgb(lerp(
+                current_stop.prepared_color,
+                next_stop.prepared_color,
+                segment_t
+            ));
+        default:
+            return lerp(
+                current_stop.prepared_color,
+                next_stop.prepared_color,
+                segment_t
+            );
     }
 
     return last_stop.prepared_color;

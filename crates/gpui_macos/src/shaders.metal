@@ -7,6 +7,8 @@ typedef PackedBackground Background;
 typedef PackedGradientStop GradientStop;
 typedef PackedQuad Quad;
 
+constant uint MAX_GRADIENT_SEARCH_STEPS = 8;
+
 float4 hsla_to_rgba(Hsla hsla);
 float3 srgb_to_linear(float3 color);
 float3 linear_to_srgb(float3 color);
@@ -1171,35 +1173,43 @@ float4 resolve_gradient_color(
     return last_stop.prepared_color;
   }
 
-  for (uint i = 0; i + 1 < background.stop_count; ++i) {
-    GradientStop current_stop = gradient_stops[background.stop_offset + i];
-    GradientStop next_stop = gradient_stops[background.stop_offset + i + 1];
-    if (t <= next_stop.percentage) {
-      if (next_stop.percentage == current_stop.percentage) {
-        return next_stop.prepared_color;
-      }
-
-      float segment_t = clamp(
-        (t - current_stop.percentage) / (next_stop.percentage - current_stop.percentage),
-        0.0,
-        1.0
-      );
-
-      switch (background.color_space) {
-        case 1:
-          return oklab_to_srgb(mix(
-            current_stop.prepared_color,
-            next_stop.prepared_color,
-            segment_t
-          ));
-        default:
-          return mix(
-            current_stop.prepared_color,
-            next_stop.prepared_color,
-            segment_t
-          );
-      }
+  uint lower = 0;
+  uint upper = background.stop_count - 1;
+  for (uint step = 0; step < MAX_GRADIENT_SEARCH_STEPS && lower + 1 < upper; ++step) {
+    uint mid = lower + (upper - lower) / 2;
+    GradientStop mid_stop = gradient_stops[background.stop_offset + mid];
+    if (t <= mid_stop.percentage) {
+      upper = mid;
+    } else {
+      lower = mid;
     }
+  }
+
+  GradientStop current_stop = gradient_stops[background.stop_offset + lower];
+  GradientStop next_stop = gradient_stops[background.stop_offset + upper];
+  if (next_stop.percentage == current_stop.percentage) {
+    return next_stop.prepared_color;
+  }
+
+  float segment_t = clamp(
+    (t - current_stop.percentage) / (next_stop.percentage - current_stop.percentage),
+    0.0,
+    1.0
+  );
+
+  switch (background.color_space) {
+    case 1:
+      return oklab_to_srgb(mix(
+        current_stop.prepared_color,
+        next_stop.prepared_color,
+        segment_t
+      ));
+    default:
+      return mix(
+        current_stop.prepared_color,
+        next_stop.prepared_color,
+        segment_t
+      );
   }
 
   return last_stop.prepared_color;

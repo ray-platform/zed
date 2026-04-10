@@ -97,6 +97,7 @@ struct GammaParams {
 
 const M_PI_F: f32 = 3.1415926;
 const GRAYSCALE_FACTORS: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
+const MAX_GRADIENT_SEARCH_STEPS: u32 = 8u;
 struct Bounds {
     origin: vec2<f32>,
     size: vec2<f32>,
@@ -402,29 +403,37 @@ fn resolve_gradient_color(background: Background, t: f32) -> vec4<f32> {
         return last_stop.prepared_color;
     }
 
-    for (var i = 0u; i + 1u < background.stop_count; i += 1u) {
-        let current_stop = b_gradient_stops[background.stop_offset + i];
-        let next_stop = b_gradient_stops[background.stop_offset + i + 1u];
-        if (t <= next_stop.percentage) {
-            if (next_stop.percentage == current_stop.percentage) {
-                return next_stop.prepared_color;
-            }
+    var lower = 0u;
+    var upper = background.stop_count - 1u;
+    for (var step = 0u; step < MAX_GRADIENT_SEARCH_STEPS && lower + 1u < upper; step += 1u) {
+        let mid = lower + (upper - lower) / 2u;
+        let mid_stop = b_gradient_stops[background.stop_offset + mid];
+        if (t <= mid_stop.percentage) {
+            upper = mid;
+        } else {
+            lower = mid;
+        }
+    }
 
-            let segment_t = clamp(
-                (t - current_stop.percentage) / (next_stop.percentage - current_stop.percentage),
-                0.0,
-                1.0,
-            );
+    let current_stop = b_gradient_stops[background.stop_offset + lower];
+    let next_stop = b_gradient_stops[background.stop_offset + upper];
+    if (next_stop.percentage == current_stop.percentage) {
+        return next_stop.prepared_color;
+    }
 
-            switch (background.color_space) {
-                default: {
-                    return mix(current_stop.prepared_color, next_stop.prepared_color, segment_t);
-                }
-                case 1u: {
-                    let oklab_color = mix(current_stop.prepared_color, next_stop.prepared_color, segment_t);
-                    return oklab_to_srgb(oklab_color);
-                }
-            }
+    let segment_t = clamp(
+        (t - current_stop.percentage) / (next_stop.percentage - current_stop.percentage),
+        0.0,
+        1.0,
+    );
+
+    switch (background.color_space) {
+        default: {
+            return mix(current_stop.prepared_color, next_stop.prepared_color, segment_t);
+        }
+        case 1u: {
+            let oklab_color = mix(current_stop.prepared_color, next_stop.prepared_color, segment_t);
+            return oklab_to_srgb(oklab_color);
         }
     }
 
