@@ -937,11 +937,18 @@ float4 hsla_to_rgba(Hsla hsla) {
 }
 
 float3 srgb_to_linear(float3 color) {
-  return pow(color, float3(2.2));
+  bool3 cutoff = color < float3(0.04045);
+  float3 higher = pow((color + float3(0.055)) / float3(1.055), float3(2.4));
+  float3 lower = color / float3(12.92);
+  return select(higher, lower, cutoff);
 }
 
 float3 linear_to_srgb(float3 color) {
-  return pow(color, float3(1.0 / 2.2));
+  float3 clamped = max(color, float3(0.0));
+  bool3 cutoff = clamped < float3(0.0031308);
+  float3 higher = float3(1.055) * pow(clamped, float3(1.0 / 2.4)) - float3(0.055);
+  float3 lower = clamped * float3(12.92);
+  return select(higher, lower, cutoff);
 }
 
 // Converts a sRGB color to the Oklab color space.

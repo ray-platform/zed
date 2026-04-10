@@ -115,14 +115,33 @@ float4 distance_from_clip_rect_transformed(float2 unit_vertex, Bounds bounds, Bo
     return distance_from_clip_rect_impl(transformed, clip_bounds);
 }
 
-// Convert linear RGB to sRGB
-float3 linear_to_srgb(float3 color) {
-    return pow(color, float3(2.2, 2.2, 2.2));
+float srgb_to_linear_component(float color) {
+    return color < 0.04045
+        ? color / 12.92
+        : pow((color + 0.055) / 1.055, 2.4);
 }
 
-// Convert sRGB to linear RGB
 float3 srgb_to_linear(float3 color) {
-    return pow(color, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
+    return float3(
+        srgb_to_linear_component(color.r),
+        srgb_to_linear_component(color.g),
+        srgb_to_linear_component(color.b)
+    );
+}
+
+float linear_to_srgb_component(float color) {
+    float clamped = max(color, 0.0);
+    return clamped < 0.0031308
+        ? clamped * 12.92
+        : 1.055 * pow(clamped, 1.0 / 2.4) - 0.055;
+}
+
+float3 linear_to_srgb(float3 color) {
+    return float3(
+        linear_to_srgb_component(color.r),
+        linear_to_srgb_component(color.g),
+        linear_to_srgb_component(color.b)
+    );
 }
 
 /// Hsla to linear RGBA conversion.

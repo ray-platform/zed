@@ -221,9 +221,10 @@ fn srgb_to_linear_component(a: f32) -> f32 {
 }
 
 fn linear_to_srgb(linear: vec3<f32>) -> vec3<f32> {
-    let cutoff = linear < vec3<f32>(0.0031308);
-    let higher = vec3<f32>(1.055) * pow(linear, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
-    let lower = linear * vec3<f32>(12.92);
+    let clamped = max(linear, vec3<f32>(0.0));
+    let cutoff = clamped < vec3<f32>(0.0031308);
+    let higher = vec3<f32>(1.055) * pow(clamped, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    let lower = clamped * vec3<f32>(12.92);
     return select(higher, lower, cutoff);
 }
 
@@ -281,15 +282,8 @@ fn linear_srgb_to_oklab(color: vec4<f32>) -> vec4<f32> {
 	);
 }
 
-/// Match the current desktop backend transfer curve when converting Oklab
-/// interpolation results back for output. This keeps WGPU/Linux/wasm gradients
-/// visually aligned with DirectX and Metal, while guarding WGSL pow() from
-/// negative out-of-gamut intermediates.
-fn desktop_gradient_linear_to_srgb(linear: vec3<f32>) -> vec3<f32> {
-    return pow(max(linear, vec3<f32>(0.0)), vec3<f32>(2.2));
-}
-
-/// Convert an Oklab color to the current desktop-aligned output RGB space.
+/// Convert an Oklab color to the display-space sRGB output used by the
+/// gradient renderer.
 fn oklab_to_srgb(color: vec4<f32>) -> vec4<f32> {
 	let l_ = color.r + 0.3963377774 * color.g + 0.2158037573 * color.b;
 	let m_ = color.r - 0.1055613458 * color.g - 0.0638541728 * color.b;
@@ -305,7 +299,7 @@ fn oklab_to_srgb(color: vec4<f32>) -> vec4<f32> {
 		-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
 	);
 
-	return vec4<f32>(desktop_gradient_linear_to_srgb(linear_rgb), color.a);
+	return vec4<f32>(linear_to_srgb(linear_rgb), color.a);
 }
 
 fn over(below: vec4<f32>, above: vec4<f32>) -> vec4<f32> {
