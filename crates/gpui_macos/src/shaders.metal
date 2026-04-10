@@ -53,7 +53,6 @@ float4 fill_color(
 struct QuadVertexOutput {
   uint quad_id [[flat]];
   float4 position [[position]];
-  float4 border_color [[flat]];
   float2 local_position;
   float clip_distance [[clip_distance]][4];
 };
@@ -61,7 +60,6 @@ struct QuadVertexOutput {
 struct QuadFragmentInput {
   uint quad_id [[flat]];
   float4 position [[position]];
-  float4 border_color [[flat]];
   float2 local_position;
 };
 
@@ -81,12 +79,10 @@ vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
       to_device_position_transformed(unit_vertex, quad.bounds, quad.transformation, viewport_size);
   float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, quad.bounds,
                                                  quad.content_mask.bounds, quad.transformation);
-  float4 border_color = hsla_to_rgba(quad.border_color);
 
   return QuadVertexOutput{
       quad_id,
       device_position,
-      border_color,
       local_position,
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
@@ -208,7 +204,8 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
 
   float4 color = background_color;
   if (border_sdf < antialias_threshold) {
-    float4 border_color = input.border_color;
+    float4 border_color =
+      fill_color(quad.border_color, input.local_position, quad.bounds, gradient_stops);
 
     // Dashed border logic when border_style == 1
     if (quad.border_style == 1) {

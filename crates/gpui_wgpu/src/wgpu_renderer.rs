@@ -101,7 +101,7 @@ struct PackedQuad {
     bounds: PodBounds,
     content_mask: PodBounds,
     background: PackedBackground,
-    border_color: [f32; 4],
+    border_color: PackedBackground,
     corner_radii: [f32; 4],
     border_widths: [f32; 4],
     transformation: PackedTransformationMatrix,
@@ -120,10 +120,10 @@ const _: [(); 16] = [(); size_of::<PodBounds>()];
 const _: [(); 24] = [(); size_of::<PackedTransformationMatrix>()];
 const _: [(); 48] = [(); size_of::<PackedBackground>()];
 const _: [(); 8] = [(); align_of::<PackedBackground>()];
-const _: [(); 160] = [(); size_of::<PackedQuad>()];
+const _: [(); 192] = [(); size_of::<PackedQuad>()];
 const _: [(); 40] = [(); offset_of!(PackedQuad, background)];
 const _: [(); 88] = [(); offset_of!(PackedQuad, border_color)];
-const _: [(); 136] = [(); offset_of!(PackedQuad, transformation)];
+const _: [(); 168] = [(); offset_of!(PackedQuad, transformation)];
 const _: [(); 80] = [(); size_of::<PackedPathRasterizationVertex>()];
 const _: [(); 16] = [(); offset_of!(PackedPathRasterizationVertex, background)];
 const _: [(); 64] = [(); offset_of!(PackedPathRasterizationVertex, bounds)];
@@ -138,7 +138,7 @@ fn pack_quads(quads: &[Quad]) -> (Vec<PackedQuad>, Vec<PackedGradientStop>) {
             bounds: quad.bounds.into(),
             content_mask: quad.content_mask.bounds.into(),
             background: pack_background(&quad.background, &mut gradient_stops),
-            border_color: pack_hsla(quad.border_color),
+            border_color: pack_background(&quad.border_color, &mut gradient_stops),
             corner_radii: pack_corners(quad.corner_radii),
             border_widths: pack_edges(quad.border_widths),
             transformation: pack_transformation(quad.transformation),

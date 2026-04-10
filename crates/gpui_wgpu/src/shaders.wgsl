@@ -97,7 +97,6 @@ struct GammaParams {
 
 const M_PI_F: f32 = 3.1415926;
 const GRAYSCALE_FACTORS: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
-
 struct Bounds {
     origin: vec2<f32>,
     size: vec2<f32>,
@@ -534,7 +533,7 @@ struct Quad {
     bounds: Bounds,
     content_mask: Bounds,
     background: Background,
-    border_color: Hsla,
+    border_color: Background,
     corner_radii: Corners,
     border_widths: Edges,
     transformation: TransformationMatrix,
@@ -544,11 +543,10 @@ struct Quad {
 
 struct QuadVarying {
     @builtin(position) position: vec4<f32>,
-    @location(0) @interpolate(flat) border_color: vec4<f32>,
-    @location(1) @interpolate(flat) quad_id: u32,
+    @location(0) @interpolate(flat) quad_id: u32,
     // TODO: use `clip_distance` once Naga supports it
-    @location(2) clip_distances: vec4<f32>,
-    @location(3) local_position: vec2<f32>,
+    @location(1) clip_distances: vec4<f32>,
+    @location(2) local_position: vec2<f32>,
 }
 
 @vertex
@@ -559,7 +557,6 @@ fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) insta
 
     var out = QuadVarying();
     out.position = to_device_position_transformed(unit_vertex, quad.bounds, quad.transformation);
-    out.border_color = hsla_to_rgba(quad.border_color);
     out.quad_id = instance_id;
     out.clip_distances = distance_from_clip_rect_transformed(
         unit_vertex,
@@ -696,7 +693,7 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
 
     var color = background_color;
     if (border_sdf < antialias_threshold) {
-        var border_color = input.border_color;
+        var border_color = gradient_color(quad.border_color, input.local_position, quad.bounds);
 
         // Dashed border logic when border_style == 1
         if (quad.border_style == 1) {
