@@ -500,7 +500,7 @@ pub struct Quad {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub background: Background,
-    pub border_color: Hsla,
+    pub border_color: Background,
     pub corner_radii: Corners<ScaledPixels>,
     pub border_widths: Edges<ScaledPixels>,
     pub transformation: TransformationMatrix,

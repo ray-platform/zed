@@ -5,9 +5,9 @@ use std::{
 };
 
 use crate::{
-    AbsoluteLength, App, Background, BackgroundTag, BorderStyle, Bounds, ContentMask, Corners,
-    CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font,
-    FontFallbacks, FontFeatures, FontStyle, FontWeight, GridLocation, Hsla, Length, Pixels, Point,
+    AbsoluteLength, App, Background, BorderStyle, Bounds, ContentMask, Corners, CornersRefinement,
+    CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font, FontFallbacks,
+    FontFeatures, FontStyle, FontWeight, GridLocation, Hsla, Length, Pixels, Point,
     PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun,
     TransformationMatrix, Window, black, phi, point, quad, radians, rems, size,
 };
@@ -274,8 +274,8 @@ pub struct Style {
     /// The fill color of this element
     pub background: Option<Fill>,
 
-    /// The border color of this element
-    pub border_color: Option<Hsla>,
+    /// The border paint of this element
+    pub border_color: Option<Background>,
 
     /// The border style of this element
     pub border_style: BorderStyle,
@@ -668,6 +668,7 @@ impl Style {
 
                 if self
                     .border_color
+                    .as_ref()
                     .is_some_and(|color| !color.is_transparent())
                 {
                     min.x += self.border_widths.left.to_pixels(rem_size);
@@ -735,27 +736,12 @@ impl Style {
                     .as_ref()
                     .is_some_and(|color| !color.is_transparent())
                 {
-                    let mut border_color = match background_color {
-                        Some(ref color) => match color.tag {
-                            BackgroundTag::Solid
-                            | BackgroundTag::PatternSlash
-                            | BackgroundTag::Checkerboard => color.solid,
-
-                            BackgroundTag::LinearGradient => color
-                                .stops
-                                .first()
-                                .map(|stop| stop.color)
-                                .unwrap_or_default(),
-                        },
-                        None => Hsla::default(),
-                    };
-                    border_color.a = 0.;
                     window.paint_quad(quad(
                         bounds,
                         corner_radii,
                         background_color.clone().unwrap_or_default(),
                         Edges::default(),
-                        border_color,
+                        background_color.clone().unwrap_or_default().opacity(0.),
                         self.border_style,
                     ));
                 }
@@ -794,14 +780,13 @@ impl Style {
                     );
                     right_bounds.size = right_bounds.size.max(&zero_size);
 
-                    let mut background = self.border_color.unwrap_or_default();
-                    background.a = 0.;
+                    let background = self.border_color.clone().unwrap_or_default().opacity(0.);
                     let quad = quad(
                         bounds,
                         corner_radii,
                         background,
                         border_widths,
-                        self.border_color.unwrap_or_default(),
+                        self.border_color.clone().unwrap_or_default(),
                         self.border_style,
                     );
 
@@ -844,6 +829,7 @@ impl Style {
 
     fn is_border_visible(&self) -> bool {
         self.border_color
+            .as_ref()
             .is_some_and(|color| !color.is_transparent())
             && self.border_widths.any(|length| !length.is_zero())
     }
