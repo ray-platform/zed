@@ -1,7 +1,7 @@
 use smallvec::SmallVec;
 
 use crate::{
-    AnyElement, App, Axis, Bounds, Corner, Display, Edges, Element, GlobalElementId,
+    AnyElement, App, Axis, Bounds, Corner, Display, Edges, Element, ElementId, GlobalElementId,
     InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Point, Position, Size, Style,
     Window, point, px,
 };
@@ -16,6 +16,7 @@ pub struct AnchoredState {
 pub struct Anchored {
     children: SmallVec<[AnyElement; 2]>,
     anchor_corner: Corner,
+    id: Option<ElementId>,
     fit_mode: AnchoredFitMode,
     anchor_position: Option<Point<Pixels>>,
     position_mode: AnchoredPositionMode,
@@ -28,6 +29,7 @@ pub fn anchored() -> Anchored {
     Anchored {
         children: SmallVec::new(),
         anchor_corner: Corner::TopLeft,
+        id: None,
         fit_mode: AnchoredFitMode::SwitchAnchor,
         anchor_position: None,
         position_mode: AnchoredPositionMode::Window,
@@ -39,6 +41,12 @@ impl Anchored {
     /// Sets which corner of the anchored element should be anchored to the current position.
     pub fn anchor(mut self, anchor: Corner) -> Self {
         self.anchor_corner = anchor;
+        self
+    }
+
+    /// Sets the id for this element.
+    pub fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = Some(id.into());
         self
     }
 
@@ -87,8 +95,8 @@ impl Element for Anchored {
     type RequestLayoutState = AnchoredState;
     type PrepaintState = ();
 
-    fn id(&self) -> Option<crate::ElementId> {
-        None
+    fn id(&self) -> Option<ElementId> {
+        self.id.clone()
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {

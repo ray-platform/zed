@@ -1,12 +1,13 @@
 use crate::{
-    AnyElement, App, Bounds, Element, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
-    Pixels, Window,
+    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement,
+    LayoutId, Pixels, Window,
 };
 
 /// Builds a `Deferred` element, which delays the layout and paint of its child.
 pub fn deferred(child: impl IntoElement) -> Deferred {
     Deferred {
         child: Some(child.into_any_element()),
+        id: None,
         priority: 0,
     }
 }
@@ -15,10 +16,17 @@ pub fn deferred(child: impl IntoElement) -> Deferred {
 /// its ancestors, while keeping its layout as part of the current element tree.
 pub struct Deferred {
     child: Option<AnyElement>,
+    id: Option<ElementId>,
     priority: usize,
 }
 
 impl Deferred {
+    /// Sets the id for this element.
+    pub fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     /// Sets the `priority` value of the `deferred` element, which
     /// determines the drawing order relative to other deferred elements,
     /// with higher values being drawn on top.
@@ -32,8 +40,8 @@ impl Element for Deferred {
     type RequestLayoutState = ();
     type PrepaintState = ();
 
-    fn id(&self) -> Option<crate::ElementId> {
-        None
+    fn id(&self) -> Option<ElementId> {
+        self.id.clone()
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {

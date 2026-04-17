@@ -24,6 +24,7 @@ impl From<CVPixelBuffer> for SurfaceSource {
 /// A surface element.
 pub struct Surface {
     source: SurfaceSource,
+    id: Option<ElementId>,
     object_fit: ObjectFit,
     style: StyleRefinement,
 }
@@ -33,12 +34,19 @@ pub struct Surface {
 pub fn surface(source: impl Into<SurfaceSource>) -> Surface {
     Surface {
         source: source.into(),
+        id: None,
         object_fit: ObjectFit::Contain,
         style: Default::default(),
     }
 }
 
 impl Surface {
+    /// Sets the id for this element.
+    pub fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     /// Set the object fit for the image.
     pub fn object_fit(mut self, object_fit: ObjectFit) -> Self {
         self.object_fit = object_fit;
@@ -51,7 +59,7 @@ impl Element for Surface {
     type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
-        None
+        self.id.clone()
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {

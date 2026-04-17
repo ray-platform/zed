@@ -15,6 +15,7 @@ use std::{collections::HashMap, fmt, sync::Arc};
 pub fn image_cache(image_cache_provider: impl ImageCacheProvider) -> ImageCacheElement {
     ImageCacheElement {
         image_cache_provider: Box::new(image_cache_provider),
+        id: None,
         style: StyleRefinement::default(),
         children: SmallVec::default(),
     }
@@ -71,8 +72,17 @@ mod any_image_cache {
 /// An image cache element.
 pub struct ImageCacheElement {
     image_cache_provider: Box<dyn ImageCacheProvider>,
+    id: Option<ElementId>,
     style: StyleRefinement,
     children: SmallVec<[AnyElement; 2]>,
+}
+
+impl ImageCacheElement {
+    /// Sets the id for this element.
+    pub fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
 }
 
 impl ParentElement for ImageCacheElement {
@@ -100,7 +110,7 @@ impl Element for ImageCacheElement {
     type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
-        None
+        self.id.clone()
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
