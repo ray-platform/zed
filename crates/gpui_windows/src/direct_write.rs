@@ -625,6 +625,7 @@ impl DirectWriteState {
 
             Ok(LineLayout {
                 font_size,
+                letter_spacing: Pixels::ZERO,
                 width,
                 ascent,
                 descent,

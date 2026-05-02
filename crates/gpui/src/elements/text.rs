@@ -399,6 +399,7 @@ impl TextLayout {
     ) -> LayoutId {
         let text_style = window.text_style();
         let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let letter_spacing = text_style.letter_spacing.to_pixels(window.rem_size());
         let line_height = window.pixel_snap(
             text_style
                 .line_height
@@ -454,7 +455,9 @@ impl TextLayout {
                     return size;
                 }
 
-                let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+                let mut line_wrapper =
+                    cx.text_system()
+                        .line_wrapper(text_style.font(), font_size, letter_spacing);
                 let (text, runs) = if let Some(truncate_width) = truncate_width {
                     line_wrapper.truncate_line(
                         text.clone(),
@@ -473,6 +476,7 @@ impl TextLayout {
                     .shape_text(
                         text,
                         font_size,
+                        letter_spacing,
                         &runs,
                         wrap_width,            // Wrap if we know the width.
                         text_style.line_clamp, // Limit the number of lines if line_clamp is set.

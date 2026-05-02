@@ -455,6 +455,7 @@ impl CosmicTextSystemState {
         let Some(layout) = layout_lines.first() else {
             return LineLayout {
                 font_size,
+                letter_spacing: Pixels::ZERO,
                 width: Pixels::ZERO,
                 ascent: Pixels::ZERO,
                 descent: Pixels::ZERO,
@@ -511,6 +512,7 @@ impl CosmicTextSystemState {
 
         LineLayout {
             font_size,
+            letter_spacing: Pixels::ZERO,
             width: layout.w.into(),
             ascent: layout.max_ascent.into(),
             descent: layout.max_descent.into(),

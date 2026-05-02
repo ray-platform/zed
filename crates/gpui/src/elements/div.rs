@@ -2117,6 +2117,7 @@ impl Interactivity {
                     .shape_text(
                         element_id.into(),
                         FONT_SIZE,
+                        crate::Pixels::ZERO,
                         &[window.text_style().to_run(str_len)],
                         None,
                         None,

@@ -16,6 +16,8 @@ use super::LineWrapper;
 pub struct LineLayout {
     /// The font size for this line
     pub font_size: Pixels,
+    /// The additional spacing between glyph clusters for this line.
+    pub letter_spacing: Pixels,
     /// The width of the line
     pub width: Pixels,
     /// The ascent of the line
@@ -513,6 +515,7 @@ impl LineLayoutCache {
         &self,
         text: Text,
         font_size: Pixels,
+        letter_spacing: Pixels,
         runs: &[FontRun],
         wrap_width: Option<Pixels>,
         max_lines: Option<usize>,
@@ -524,6 +527,7 @@ impl LineLayoutCache {
         let key = &CacheKeyRef {
             text: text.as_ref(),
             font_size,
+            letter_spacing,
             runs,
             wrap_width,
             force_width: None,
@@ -545,7 +549,8 @@ impl LineLayoutCache {
         } else {
             drop(current_frame);
             let text = SharedString::from(text);
-            let unwrapped_layout = self.layout_line::<&SharedString>(&text, font_size, runs, None);
+            let unwrapped_layout =
+                self.layout_line::<&SharedString>(&text, font_size, letter_spacing, runs, None);
             let wrap_boundaries = if let Some(wrap_width) = wrap_width {
                 unwrapped_layout.compute_wrap_boundaries(text.as_ref(), wrap_width, max_lines)
             } else {
@@ -559,6 +564,7 @@ impl LineLayoutCache {
             let key = Arc::new(CacheKey {
                 text,
                 font_size,
+                letter_spacing,
                 runs: SmallVec::from(runs),
                 wrap_width,
                 force_width: None,
@@ -578,6 +584,7 @@ impl LineLayoutCache {
         &self,
         text: Text,
         font_size: Pixels,
+        letter_spacing: Pixels,
         runs: &[FontRun],
         force_width: Option<Pixels>,
     ) -> Arc<LineLayout>
@@ -588,6 +595,7 @@ impl LineLayoutCache {
         let key = &CacheKeyRef {
             text: text.as_ref(),
             font_size,
+            letter_spacing,
             runs,
             wrap_width: None,
             force_width,
@@ -609,6 +617,8 @@ impl LineLayoutCache {
                 .platform_text_system
                 .layout_line(&text, font_size, runs);
 
+            apply_letter_spacing_to_layout(&mut layout, letter_spacing);
+
             if let Some(force_width) = force_width {
                 apply_force_width_to_layout(&mut layout, force_width);
             }
@@ -616,6 +626,7 @@ impl LineLayoutCache {
             let key = Arc::new(CacheKey {
                 text,
                 font_size,
+                letter_spacing,
                 runs: SmallVec::from(runs),
                 wrap_width: None,
                 force_width,
@@ -640,6 +651,7 @@ impl LineLayoutCache {
         text_hash: u64,
         text_len: usize,
         font_size: Pixels,
+        letter_spacing: Pixels,
         runs: &[FontRun],
         force_width: Option<Pixels>,
     ) -> Option<Arc<LineLayout>> {
@@ -647,6 +659,7 @@ impl LineLayoutCache {
             text_hash,
             text_len,
             font_size,
+            letter_spacing,
             runs,
             wrap_width: None,
             force_width,
@@ -658,6 +671,7 @@ impl LineLayoutCache {
                 text_hash: key.text_hash,
                 text_len: key.text_len,
                 font_size: key.font_size,
+                letter_spacing: key.letter_spacing,
                 runs: key.runs.as_slice(),
                 wrap_width: key.wrap_width,
                 force_width: key.force_width,
@@ -672,6 +686,7 @@ impl LineLayoutCache {
                 text_hash: key.text_hash,
                 text_len: key.text_len,
                 font_size: key.font_size,
+                letter_spacing: key.letter_spacing,
                 runs: key.runs.as_slice(),
                 wrap_width: key.wrap_width,
                 force_width: key.force_width,
@@ -696,6 +711,7 @@ impl LineLayoutCache {
         text_hash: u64,
         text_len: usize,
         font_size: Pixels,
+        letter_spacing: Pixels,
         runs: &[FontRun],
         force_width: Option<Pixels>,
         materialize_text: impl FnOnce() -> SharedString,
@@ -704,6 +720,7 @@ impl LineLayoutCache {
             text_hash,
             text_len,
             font_size,
+            letter_spacing,
             runs,
             wrap_width: None,
             force_width,
@@ -716,6 +733,7 @@ impl LineLayoutCache {
                 text_hash: key.text_hash,
                 text_len: key.text_len,
                 font_size: key.font_size,
+                letter_spacing: key.letter_spacing,
                 runs: key.runs.as_slice(),
                 wrap_width: key.wrap_width,
                 force_width: key.force_width,
@@ -737,6 +755,7 @@ impl LineLayoutCache {
                     text_hash: key.text_hash,
                     text_len: key.text_len,
                     font_size: key.font_size,
+                    letter_spacing: key.letter_spacing,
                     runs: key.runs.as_slice(),
                     wrap_width: key.wrap_width,
                     force_width: key.force_width,
@@ -758,6 +777,8 @@ impl LineLayoutCache {
             .platform_text_system
             .layout_line(&text, font_size, runs);
 
+        apply_letter_spacing_to_layout(&mut layout, letter_spacing);
+
         if let Some(force_width) = force_width {
             apply_force_width_to_layout(&mut layout, force_width);
         }
@@ -766,6 +787,7 @@ impl LineLayoutCache {
             text_hash,
             text_len,
             font_size,
+            letter_spacing,
             runs: SmallVec::from(runs),
             wrap_width: None,
             force_width,
@@ -777,6 +799,38 @@ impl LineLayoutCache {
         current_frame.used_lines_by_hash.push(key);
         layout
     }
+}
+
+fn apply_letter_spacing_to_layout(layout: &mut LineLayout, letter_spacing: Pixels) {
+    if letter_spacing == Pixels::ZERO {
+        layout.letter_spacing = letter_spacing;
+        return;
+    }
+
+    let mut base_glyph_count = 0usize;
+    let mut last_base_shaped_x = px(f32::NEG_INFINITY);
+    let mut last_base_actual_x = px(0.);
+
+    for run in layout.runs.iter_mut() {
+        for glyph in run.glyphs.iter_mut() {
+            let shaped_x = glyph.position.x;
+            if shaped_x > last_base_shaped_x + px(0.01) {
+                let offset = letter_spacing * base_glyph_count as f32;
+                glyph.position.x = shaped_x + offset;
+                last_base_shaped_x = shaped_x;
+                last_base_actual_x = glyph.position.x;
+                base_glyph_count += 1;
+            } else {
+                glyph.position.x = last_base_actual_x + (shaped_x - last_base_shaped_x);
+            }
+        }
+    }
+
+    if base_glyph_count > 1 {
+        layout.width =
+            (layout.width + letter_spacing * (base_glyph_count - 1) as f32).max(Pixels::ZERO);
+    }
+    layout.letter_spacing = letter_spacing;
 }
 
 // Combining marks (e.g. Thai vowel signs, Arabic diacritics) are shaped by
@@ -825,6 +879,7 @@ trait AsCacheKeyRef {
 struct CacheKey {
     text: SharedString,
     font_size: Pixels,
+    letter_spacing: Pixels,
     runs: SmallVec<[FontRun; 1]>,
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
@@ -834,6 +889,7 @@ struct CacheKey {
 struct CacheKeyRef<'a> {
     text: &'a str,
     font_size: Pixels,
+    letter_spacing: Pixels,
     runs: &'a [FontRun],
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
@@ -844,6 +900,7 @@ struct HashedCacheKey {
     text_hash: u64,
     text_len: usize,
     font_size: Pixels,
+    letter_spacing: Pixels,
     runs: SmallVec<[FontRun; 1]>,
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
@@ -854,6 +911,7 @@ struct HashedCacheKeyRef<'a> {
     text_hash: u64,
     text_len: usize,
     font_size: Pixels,
+    letter_spacing: Pixels,
     runs: &'a [FontRun],
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
@@ -870,6 +928,7 @@ impl PartialEq for HashedCacheKey {
         self.text_hash == other.text_hash
             && self.text_len == other.text_len
             && self.font_size == other.font_size
+            && self.letter_spacing == other.letter_spacing
             && self.runs.as_slice() == other.runs.as_slice()
             && self.wrap_width == other.wrap_width
             && self.force_width == other.force_width
@@ -883,6 +942,7 @@ impl Hash for HashedCacheKey {
         self.text_hash.hash(state);
         self.text_len.hash(state);
         self.font_size.hash(state);
+        self.letter_spacing.hash(state);
         self.runs.as_slice().hash(state);
         self.wrap_width.hash(state);
         self.force_width.hash(state);
@@ -894,6 +954,7 @@ impl PartialEq for HashedCacheKeyRef<'_> {
         self.text_hash == other.text_hash
             && self.text_len == other.text_len
             && self.font_size == other.font_size
+            && self.letter_spacing == other.letter_spacing
             && self.runs == other.runs
             && self.wrap_width == other.wrap_width
             && self.force_width == other.force_width
@@ -907,6 +968,7 @@ impl Hash for HashedCacheKeyRef<'_> {
         self.text_hash.hash(state);
         self.text_len.hash(state);
         self.font_size.hash(state);
+        self.letter_spacing.hash(state);
         self.runs.hash(state);
         self.wrap_width.hash(state);
         self.force_width.hash(state);
@@ -926,6 +988,7 @@ impl AsCacheKeyRef for CacheKey {
         CacheKeyRef {
             text: &self.text,
             font_size: self.font_size,
+            letter_spacing: self.letter_spacing,
             runs: self.runs.as_slice(),
             wrap_width: self.wrap_width,
             force_width: self.force_width,
@@ -974,6 +1037,7 @@ mod tests {
     fn make_layout(glyphs: Vec<ShapedGlyph>) -> LineLayout {
         LineLayout {
             font_size: px(16.),
+            letter_spacing: px(0.),
             width: px(100.),
             ascent: px(12.),
             descent: px(4.),
@@ -991,6 +1055,30 @@ mod tests {
             .iter()
             .map(|g| f32::from(g.position.x))
             .collect()
+    }
+
+    #[test]
+    fn test_letter_spacing_advances_base_glyphs() {
+        let mut layout = make_layout(vec![glyph_at(0., 0), glyph_at(8., 1), glyph_at(16., 2)]);
+
+        apply_letter_spacing_to_layout(&mut layout, px(2.));
+
+        let positions = glyph_x_positions(&layout);
+        assert_eq!(positions, vec![0., 10., 20.]);
+        assert_eq!(layout.width, px(104.));
+        assert_eq!(layout.letter_spacing, px(2.));
+    }
+
+    #[test]
+    fn test_letter_spacing_keeps_combining_marks_on_base_glyph() {
+        let mut layout = make_layout(vec![glyph_at(0., 0), glyph_at(0., 3), glyph_at(8., 6)]);
+
+        apply_letter_spacing_to_layout(&mut layout, px(2.));
+
+        let positions = glyph_x_positions(&layout);
+        assert_eq!(positions, vec![0., 0., 10.]);
+        assert_eq!(layout.width, px(102.));
+        assert_eq!(layout.letter_spacing, px(2.));
     }
 
     #[test]

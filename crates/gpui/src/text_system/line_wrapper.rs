@@ -16,6 +16,7 @@ pub struct LineWrapper {
     text_system: Arc<TextSystem>,
     pub(crate) font_id: FontId,
     pub(crate) font_size: Pixels,
+    pub(crate) letter_spacing: Pixels,
     cached_ascii_char_widths: [Option<Pixels>; 128],
     cached_other_char_widths: HashMap<char, Pixels>,
 }
@@ -24,11 +25,17 @@ impl LineWrapper {
     /// The maximum indent that can be applied to a line.
     pub const MAX_INDENT: u32 = 256;
 
-    pub(crate) fn new(font_id: FontId, font_size: Pixels, text_system: Arc<TextSystem>) -> Self {
+    pub(crate) fn new(
+        font_id: FontId,
+        font_size: Pixels,
+        letter_spacing: Pixels,
+        text_system: Arc<TextSystem>,
+    ) -> Self {
         Self {
             text_system,
             font_id,
             font_size,
+            letter_spacing,
             cached_ascii_char_widths: [None; 128],
             cached_other_char_widths: HashMap::default(),
         }
@@ -250,7 +257,7 @@ impl LineWrapper {
 
     #[inline(always)]
     fn width_for_char(&mut self, c: char) -> Pixels {
-        if (c as u32) < 128 {
+        let width = if (c as u32) < 128 {
             if let Some(cached_width) = self.cached_ascii_char_widths[c as usize] {
                 cached_width
             } else {
@@ -268,7 +275,9 @@ impl LineWrapper {
                 .layout_width(self.font_id, self.font_size, c);
             self.cached_other_char_widths.insert(c, width);
             width
-        }
+        };
+
+        width + self.letter_spacing
     }
 }
 
@@ -390,7 +399,7 @@ mod tests {
         let dispatcher = TestDispatcher::new(0);
         let cx = TestAppContext::build(dispatcher, None);
         let id = cx.text_system().resolve_font(&font(".ZedMono"));
-        LineWrapper::new(id, px(16.), cx.text_system().clone())
+        LineWrapper::new(id, px(16.), px(0.), cx.text_system().clone())
     }
 
     fn generate_test_runs(input_run_len: &[usize]) -> Vec<TextRun> {
@@ -905,6 +914,7 @@ mod tests {
                 .shape_text(
                     text,
                     px(16.),
+                    px(0.),
                     &[
                         normal.with_len(4),
                         bold.with_len(5),

@@ -9,7 +9,7 @@ use crate::{
     CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font, FontFallbacks,
     FontFeatures, FontStyle, FontWeight, GridLocation, Hsla, Length, Pixels, Point,
     PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun,
-    TransformationMatrix, Window, black, phi, point, quad, radians, rems, size,
+    TransformationMatrix, Window, black, phi, point, px, quad, radians, rems, size,
 };
 use collections::HashSet;
 use refineable::Refineable;
@@ -429,6 +429,9 @@ pub struct TextStyle {
     /// The line height to use, in pixels or fractions
     pub line_height: DefiniteLength,
 
+    /// The additional spacing between glyph clusters, in pixels or rems.
+    pub letter_spacing: AbsoluteLength,
+
     /// The font weight, e.g. bold
     pub font_weight: FontWeight,
 
@@ -467,6 +470,7 @@ impl Default for TextStyle {
             font_fallbacks: None,
             font_size: rems(1.).into(),
             line_height: phi(),
+            letter_spacing: px(0.).into(),
             font_weight: FontWeight::default(),
             font_style: FontStyle::default(),
             background_color: None,

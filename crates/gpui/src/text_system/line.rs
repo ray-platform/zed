@@ -70,6 +70,7 @@ impl ShapedLine {
         let layout = self.layout.as_ref();
         self.layout = Arc::new(LineLayout {
             font_size: layout.font_size,
+            letter_spacing: layout.letter_spacing,
             width: layout.width,
             ascent: layout.ascent,
             descent: layout.descent,
@@ -225,6 +226,7 @@ impl ShapedLine {
         let left = ShapedLine {
             layout: Arc::new(LineLayout {
                 font_size: self.layout.font_size,
+                letter_spacing: self.layout.letter_spacing,
                 width: left_width,
                 ascent: self.layout.ascent,
                 descent: self.layout.descent,
@@ -238,6 +240,7 @@ impl ShapedLine {
         let right = ShapedLine {
             layout: Arc::new(LineLayout {
                 font_size: self.layout.font_size,
+                letter_spacing: self.layout.letter_spacing,
                 width: right_width,
                 ascent: self.layout.ascent,
                 descent: self.layout.descent,
@@ -775,6 +778,7 @@ mod tests {
         ShapedLine {
             layout: Arc::new(LineLayout {
                 font_size: px(16.0),
+                letter_spacing: px(0.0),
                 width: px(width),
                 ascent: px(12.0),
                 descent: px(4.0),
@@ -849,6 +853,7 @@ mod tests {
         let line = ShapedLine {
             layout: Arc::new(LineLayout {
                 font_size: px(16.0),
+                letter_spacing: px(0.0),
                 width: px(60.0),
                 ascent: px(12.0),
                 descent: px(4.0),

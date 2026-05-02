@@ -900,6 +900,7 @@ impl PlatformTextSystem for NoopTextSystem {
 
         LineLayout {
             font_size,
+            letter_spacing: Pixels::ZERO,
             width: position,
             ascent: font_size * (metrics.ascent / metrics.units_per_em as f32),
             descent: font_size * (metrics.descent / metrics.units_per_em as f32),

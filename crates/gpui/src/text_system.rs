@@ -310,7 +310,12 @@ impl TextSystem {
     }
 
     /// Returns a handle to a line wrapper, for the given font and font size.
-    pub fn line_wrapper(self: &Arc<Self>, font: Font, font_size: Pixels) -> LineWrapperHandle {
+    pub fn line_wrapper(
+        self: &Arc<Self>,
+        font: Font,
+        font_size: Pixels,
+        letter_spacing: Pixels,
+    ) -> LineWrapperHandle {
         let lock = &mut self.wrapper_pool.lock();
         let font_id = self.resolve_font(&font);
         let wrappers = lock
@@ -318,7 +323,11 @@ impl TextSystem {
             .or_default();
         let wrapper = wrappers
             .pop()
-            .unwrap_or_else(|| LineWrapper::new(font_id, font_size, self.clone()));
+            .map(|mut wrapper| {
+                wrapper.letter_spacing = letter_spacing;
+                wrapper
+            })
+            .unwrap_or_else(|| LineWrapper::new(font_id, font_size, letter_spacing, self.clone()));
 
         LineWrapperHandle {
             wrapper: Some(wrapper),
@@ -432,7 +441,7 @@ impl WindowTextSystem {
             });
         }
 
-        let layout = self.layout_line(&text, font_size, runs, force_width);
+        let layout = self.layout_line(&text, font_size, px(0.), runs, force_width);
 
         ShapedLine {
             layout,
@@ -485,6 +494,7 @@ impl WindowTextSystem {
             text_hash,
             text_len,
             font_size,
+            px(0.),
             runs,
             used_force_width,
             || {
@@ -516,6 +526,7 @@ impl WindowTextSystem {
         &self,
         text: SharedString,
         font_size: Pixels,
+        letter_spacing: Pixels,
         runs: &[TextRun],
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
@@ -583,6 +594,7 @@ impl WindowTextSystem {
             let layout = self.line_layout_cache.layout_wrapped_line(
                 &line_text,
                 font_size,
+                letter_spacing,
                 &font_runs,
                 wrap_width,
                 max_wrap_lines.map(|max| max.saturating_sub(wrapped_lines)),
@@ -652,6 +664,7 @@ impl WindowTextSystem {
         &self,
         text: &str,
         font_size: Pixels,
+        letter_spacing: Pixels,
         runs: &[TextRun],
         force_width: Option<Pixels>,
     ) -> Arc<LineLayout> {
@@ -690,6 +703,7 @@ impl WindowTextSystem {
         let layout = self.line_layout_cache.layout_line(
             &SharedString::new(text),
             font_size,
+            letter_spacing,
             &font_runs,
             force_width,
         );
@@ -712,6 +726,7 @@ impl WindowTextSystem {
         text_hash: u64,
         text_len: usize,
         font_size: Pixels,
+        letter_spacing: Pixels,
         runs: &[TextRun],
         force_width: Option<Pixels>,
     ) -> Option<Arc<LineLayout>> {
@@ -751,6 +766,7 @@ impl WindowTextSystem {
             text_hash,
             text_len,
             font_size,
+            letter_spacing,
             &font_runs,
             force_width,
         );
@@ -773,6 +789,7 @@ impl WindowTextSystem {
         text_hash: u64,
         text_len: usize,
         font_size: Pixels,
+        letter_spacing: Pixels,
         runs: &[TextRun],
         force_width: Option<Pixels>,
         materialize_text: impl FnOnce() -> SharedString,
@@ -813,6 +830,7 @@ impl WindowTextSystem {
             text_hash,
             text_len,
             font_size,
+            letter_spacing,
             &font_runs,
             force_width,
             materialize_text,
