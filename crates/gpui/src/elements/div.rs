@@ -3353,7 +3353,7 @@ where
 }
 
 /// Represents an element that can be scrolled *to* in its parent element.
-/// Contrary to [ScrollHandle::scroll_to_active_item], an anchored element does not have to be an immediate child of the parent.
+/// Contrary to [ScrollHandle::try_scroll_to_active_item], an anchored element does not have to be an immediate child of the parent.
 #[derive(Clone)]
 pub struct ScrollAnchor {
     handle: ScrollHandle,
@@ -3757,7 +3757,7 @@ mod tests {
             });
         }
 
-        handle.scroll_to_active_item();
+        assert!(handle.try_scroll_to_active_item());
 
         assert_eq!(handle.offset().x, px(-25.));
     }
@@ -3776,7 +3776,7 @@ mod tests {
             });
         }
 
-        handle.scroll_to_active_item();
+        assert!(handle.try_scroll_to_active_item());
 
         assert_eq!(handle.offset().y, px(-25.));
     }
