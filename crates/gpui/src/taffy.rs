@@ -457,6 +457,7 @@ impl ToTaffy<taffy::style::Style> for Style {
 
         taffy::style::Style {
             display: self.display.into(),
+            direction: self.direction.into(),
             overflow: self.overflow.into(),
             scrollbar_width: self.scrollbar_width.to_taffy(rem_size, scale_factor),
             position: self.position.into(),
@@ -720,6 +721,8 @@ impl From<Size<Pixels>> for Size<AvailableSpace> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::px;
+    use taffy::prelude::TaffyMaxContent;
 
     #[test]
     fn border_widths_to_taffy_use_stroke_snapping() {
@@ -747,5 +750,103 @@ mod tests {
             taffy_border.left,
             taffy::style::LengthPercentage::length(2.0)
         );
+    }
+
+    #[test]
+    fn style_direction_maps_to_taffy_direction() {
+        let mut style = Style::default();
+        assert_eq!(
+            taffy::style::Direction::Ltr,
+            style.to_taffy(Pixels(16.0), 1.0).direction
+        );
+
+        style.direction = crate::LayoutDirection::Rtl;
+
+        assert_eq!(
+            taffy::style::Direction::Rtl,
+            style.to_taffy(Pixels(16.0), 1.0).direction
+        );
+    }
+
+    fn sized_style(width: f32, height: f32) -> Style {
+        Style {
+            size: size(px(width).into(), px(height).into()),
+            ..Default::default()
+        }
+    }
+
+    fn compute_child_locations(
+        parent_style: Style,
+        child_styles: &[Style],
+    ) -> Vec<taffy::geometry::Point<f32>> {
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+        let children = child_styles
+            .iter()
+            .map(|style| {
+                taffy
+                    .new_leaf(style.to_taffy(Pixels(16.0), 1.0))
+                    .expect(EXPECT_MESSAGE)
+            })
+            .collect::<Vec<_>>();
+        let root = taffy
+            .new_with_children(parent_style.to_taffy(Pixels(16.0), 1.0), &children)
+            .expect(EXPECT_MESSAGE);
+
+        taffy
+            .compute_layout(root, taffy::geometry::Size::MAX_CONTENT)
+            .expect(EXPECT_MESSAGE);
+
+        children
+            .into_iter()
+            .map(|child| taffy.layout(child).expect(EXPECT_MESSAGE).location)
+            .collect()
+    }
+
+    #[test]
+    fn ltr_row_layout_matches_default_row_layout() {
+        let mut default_parent = sized_style(100.0, 20.0);
+        default_parent.display = crate::Display::Flex;
+
+        let mut ltr_parent = default_parent.clone();
+        ltr_parent.direction = crate::LayoutDirection::Ltr;
+
+        let children = [sized_style(20.0, 20.0), sized_style(30.0, 20.0)];
+
+        let default_locations = compute_child_locations(default_parent, &children);
+        let ltr_locations = compute_child_locations(ltr_parent, &children);
+
+        assert_eq!(default_locations, ltr_locations);
+        assert_eq!(0.0, ltr_locations[0].x);
+        assert_eq!(20.0, ltr_locations[1].x);
+    }
+
+    #[test]
+    fn rtl_row_layout_flows_from_inline_end() {
+        let mut parent = sized_style(100.0, 20.0);
+        parent.display = crate::Display::Flex;
+        parent.direction = crate::LayoutDirection::Rtl;
+
+        let locations =
+            compute_child_locations(parent, &[sized_style(20.0, 20.0), sized_style(30.0, 20.0)]);
+
+        assert_eq!(80.0, locations[0].x);
+        assert_eq!(50.0, locations[1].x);
+    }
+
+    #[test]
+    fn rtl_grid_layout_flows_from_inline_end() {
+        let mut parent = sized_style(100.0, 20.0);
+        parent.display = crate::Display::Grid;
+        parent.direction = crate::LayoutDirection::Rtl;
+        parent.grid_cols = Some(crate::GridTemplate {
+            repeat: 2,
+            min_size: crate::TemplateColumnMinSize::Zero,
+        });
+
+        let locations =
+            compute_child_locations(parent, &[sized_style(10.0, 10.0), sized_style(10.0, 10.0)]);
+
+        assert_eq!(90.0, locations[0].x);
+        assert_eq!(40.0, locations[1].x);
     }
 }

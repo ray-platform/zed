@@ -1,8 +1,8 @@
 use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, AlignSelf, BorderStyle, CursorStyle,
     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontFeatures, FontStyle,
-    FontWeight, GridPlacement, GridTemplate, Hsla, JustifyContent, Length, Pixels, Point,
-    SharedString, StrikethroughStyle, StyleRefinement, TemplateColumnMinSize, TextAlign,
+    FontWeight, GridPlacement, GridTemplate, Hsla, JustifyContent, LayoutDirection, Length, Pixels,
+    Point, SharedString, StrikethroughStyle, StyleRefinement, TemplateColumnMinSize, TextAlign,
     TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, point, px, relative, rems,
 };
 pub use gpui_macros::{
@@ -58,6 +58,12 @@ pub trait Styled: Sized {
     /// [Docs](https://tailwindcss.com/docs/display)
     fn hidden(mut self) -> Self {
         self.style().display = Some(Display::None);
+        self
+    }
+
+    /// Sets the inline flow direction used for layout.
+    fn direction(mut self, direction: LayoutDirection) -> Self {
+        self.style().direction = Some(direction);
         self
     }
 

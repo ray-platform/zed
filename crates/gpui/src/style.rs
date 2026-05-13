@@ -215,6 +215,9 @@ pub struct Style {
     /// style property to limit the potential blast radius.
     pub restrict_scroll_to_axis: bool,
 
+    /// The inline flow direction used for layout.
+    pub direction: LayoutDirection,
+
     // Position properties
     /// What should the `position` value of this struct use as a base offset?
     pub position: Position,
@@ -850,6 +853,7 @@ impl Default for Style {
             },
             allow_concurrent_scroll: false,
             restrict_scroll_to_axis: false,
+            direction: LayoutDirection::Ltr,
             scrollbar_width: AbsoluteLength::default(),
             position: Position::Relative,
             inset: Edges::auto(),
@@ -895,6 +899,16 @@ impl Default for Style {
             debug_below: false,
         }
     }
+}
+
+/// The inline flow direction used for layout.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum LayoutDirection {
+    /// Layout inline content from left to right.
+    #[default]
+    Ltr,
+    /// Layout inline content from right to left.
+    Rtl,
 }
 
 /// The properties that can be applied to an underline.
@@ -1384,6 +1398,15 @@ impl From<FlexDirection> for taffy::style::FlexDirection {
     }
 }
 
+impl From<LayoutDirection> for taffy::style::Direction {
+    fn from(value: LayoutDirection) -> Self {
+        match value {
+            LayoutDirection::Ltr => Self::Ltr,
+            LayoutDirection::Rtl => Self::Rtl,
+        }
+    }
+}
+
 impl From<Overflow> for taffy::style::Overflow {
     fn from(value: Overflow) -> Self {
         match value {
@@ -1601,5 +1624,15 @@ mod tests {
             Some(FontWeight::SEMIBOLD),
             style.text_style().unwrap().font_weight
         );
+    }
+
+    #[test]
+    fn test_layout_direction_refinement() {
+        let mut style = Style::default();
+        assert_eq!(LayoutDirection::Ltr, style.direction);
+
+        style.refine(&StyleRefinement::default().direction(LayoutDirection::Rtl));
+
+        assert_eq!(LayoutDirection::Rtl, style.direction);
     }
 }
