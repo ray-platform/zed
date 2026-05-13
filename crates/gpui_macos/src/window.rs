@@ -1814,6 +1814,9 @@ extern "C" fn reset_cursor_rects(this: &Object, _: Sel) {
 
         let window_state = get_window_state(this);
         let cursor_style = window_state.lock().cursor_style;
+        if matches!(cursor_style, CursorStyle::None) {
+            return;
+        }
 
         let cursor: id = match cursor_style {
             CursorStyle::Arrow => msg_send![class!(NSCursor), arrowCursor],
@@ -1849,6 +1852,7 @@ extern "C" fn reset_cursor_rects(this: &Object, _: Sel) {
             CursorStyle::DragLink => msg_send![class!(NSCursor), dragLinkCursor],
             CursorStyle::DragCopy => msg_send![class!(NSCursor), dragCopyCursor],
             CursorStyle::ContextualMenu => msg_send![class!(NSCursor), contextualMenuCursor],
+            CursorStyle::None => unreachable!(),
         };
 
         let bounds = NSView::bounds(this as *const Object as id);

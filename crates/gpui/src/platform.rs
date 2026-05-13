@@ -1825,6 +1825,10 @@ pub enum CursorStyle {
     /// A cursor indicating that the operation will result in a context menu
     /// corresponds to the CSS cursor value `context-menu`
     ContextualMenu,
+
+    /// Hide the cursor
+    /// corresponds to the CSS cursor value `none`
+    None,
 }
 
 /// A clipboard item that should be copied to the clipboard
